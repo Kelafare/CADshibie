@@ -1,0 +1,10 @@
+# 推理与本地评测依赖（Linux 64 位；GPU 可选，自动回退 CPU）
+numpy==2.2.6
+Pillow==11.3.0
+scipy==1.15.3
+scikit-image==0.25.2
+scikit-learn==1.6.1
+joblib==1.4.2
+opencv-python-headless==4.11.0.86
+torch==2.6.0
+typing_extensions>=4.12

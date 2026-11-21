@@ -1,0 +1,78 @@
+项目源码与识别结果提交说明
+================================
+
+一、运行环境
+------------
+- Python 3.13（本地测试 3.13.14），64 位 Linux/Windows 均可。
+- 依赖安装：pip install -r requirements.txt
+- 主要依赖：numpy、Pillow、scipy、scikit-image、scikit-learn、joblib、
+  opencv-python-headless、torch。
+- 全程离线，不访问外部模型 API。ViT 自动使用 CUDA（RTX 3060 上训练/推理），
+  无 GPU 时自动回退 CPU，结果不变。
+
+二、推理命令
+------------
+python infer.py --input <dev_final目录> --output results --engine hybrid --workers 8
+
+或使用启动脚本：
+./run.sh --input <dev_final目录> --output results --weights weights
+
+默认引擎为 v2：精确描边色恢复 + 骨架折线几何 + 平行线优化 + ViT 语义
+（与训练集颜色→类别先验融合）。关键参数：
+  --confidence 0.35           ViT 置信度阈值
+  --color-prior-weight 0.6    颜色先验融合权重（0 关闭）
+  --class-policy weights/class_policy.json  逐类阈值/低精度类抑制
+  --nms-iou 0.6               同类假设 mask-IoU 去重
+  --max-instances 12          每图最多保留的 Thing 实例数（按置信度截断）
+  --vit-device auto           ViT 设备（auto/cuda/cpu）
+  --workers 4                 线程数（只影响速度）
+旧引擎可通过 --engine v1 复现。详细参数见 README.md 第 3.3 节。
+
+三、识别结果
+------------
+- results/ 下每张图一个 JSON，文件名与输入 PNG 去掉扩展名后完全一致。
+- 每个 JSON 包含赛题要求的 12 个字段，写盘前由 cadvec/schema.py 校验。
+- dev_final 共 1000 张，results/ 共 1000 个 JSON。
+
+四、模型与数据来源
+------------------
+- weights/stroke_palette.json：train_final SVG 的 197 种精确描边色，
+  用于抗锯齿 alpha 反混合后的颜色恢复，0 个神经网络参数。
+- weights/color_class_prior.json：描边色→类别分布（train_final 统计），
+  与 ViT 概率融合，0 神经网络参数。
+- weights/vit_strokes.pt：小型 ViT 对象分类器，2,911,525 参数，4 通道
+  224×224 输入（白底 RGB + 对象掩码），patch16/宽192/6层/6头；在 GPU 上
+  用 bf16 训练 14 轮，验证集 macro-recall 42.65%。
+- 训练标签与评估口径对齐：Thing 且 instance-id=-1 的图元归入忽略类 35；
+  对象假设按与 GT 实例的 IoU/覆盖率打标签。
+- dev_final 推理只读取 PNG，不读取任何 SVG 或真值。
+
+五、复现与自检
+--------------
+python -m pytest tests -q                  # 47 passed
+python tools/check_compliance.py           # ok: true
+python infer.py --check-only               # 总参数 2,911,525 / 上限 5B
+
+本地 test_final 全量 1000 张（参考口径 raster 1000、IoU>0.5）：
+hybrid（默认/推荐，--engine hybrid）PQ 2.597%，SQ 62.647%，RQ 4.145%，
+TP/FP/FN = 244/4201/7085；
+v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；v2 起点 1.575%；v1 0。
+泛化校验：calib 500 hybrid 3.096% vs v3 2.320%；holdout 500 2.108% vs 1.456%。
+该结果仅用于本地链路诊断，不是官方 dev_final 成绩（官方真值不公开）。
+
+六、目录说明
+------------
+infer.py                 推理入口（v2 默认，v1 可切换）
+cadvec/layers.py         精确描边色恢复与颜色层
+cadvec/skeleton.py       骨架折线追踪与 4 点采样
+cadvec/parallel.py       平行线带、端点对齐、轴向吸附
+cadvec/crops.py + vit.py 对象裁剪与 ViT 分类
+cadvec/pipeline_v2.py    v2 单图推理
+cadvec/                  v1 几何/先验/实例/评估等模块
+compliance/              离线防护与模型参数量审计
+weights/                 离线权重与模型清单
+results/                 dev_final 识别结果（1000 个 JSON）
+tools/                   调色板/候选/训练/评估/合规检查等脚本
+tests/                   单元与集成测试
+README.md                完整说明与复现命令
+METHOD.md                3 页内方法说明

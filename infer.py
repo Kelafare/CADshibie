@@ -1,0 +1,760 @@
+#!/usr/bin/env python3
+"""离线推理入口：PNG 平面图 -> 每图 12 字段 JSON。
+
+评测环境约定（见 README）：
+- 输入目录包含若干 ``*.png``，不提供任何 SVG/真值；
+- 输出目录写入 ``<文件名去扩展名>.json``；
+- 全程离线，禁止外部模型 API。
+
+用法::
+
+    python infer.py --input data/dev_final --output results --weights weights
+
+输出字段与校验见 ``cadvec/schema.py``。
+"""
+from __future__ import annotations
+
+import os
+
+# 在导入 numpy/skimage 前限制底层线程数，避免与进程池叠加造成过度订阅。
+for _variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_variable, "1")
+# ultralytics 的联网检测/遥测开关（离线评测必须关闭）。
+os.environ.setdefault("YOLO_OFFLINE", "1")
+
+import argparse
+import json
+import random
+import sys
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from cadvec.config import CANVAS_LIMITS, DEFAULT_CANVAS_HEIGHT, DEFAULT_CANVAS_WIDTH, InferenceConfig
+from cadvec.external import ExternalApiConfig, load_refiner
+from cadvec.pipeline import run_image
+from cadvec.prior import ColorPrior, PrimitiveClassifier
+from cadvec.schema import empty_output, write_output
+from compliance.net_guard import enable_offline_guard
+from compliance.params import ModelComplianceError, audit_models
+
+
+def parse_canvas(value: str) -> tuple[int, int]:
+    text = value.lower().replace(" ", "")
+    parts = text.split("x")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("画布格式应为 WxH，例如 100x100")
+    try:
+        width, height = int(parts[0]), int(parts[1])
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("画布宽高必须是整数") from error
+    low, high = CANVAS_LIMITS
+    if not (low <= width <= high and low <= height <= high):
+        raise argparse.ArgumentTypeError(
+            f"画布宽高必须在 {low}-{high} 之间"
+        )
+    return width, height
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="CAD 平面图 PNG 到矢量图元 JSON 的离线推理",
+    )
+    parser.add_argument("--input", default="data/dev_final", help="PNG 文件或目录")
+    parser.add_argument("--output", default="results", help="输出 JSON 目录")
+    parser.add_argument(
+        "--weights", default=str(SCRIPT_DIR / "weights"),
+        help="权重与模型清单目录（默认提交包内的 weights/）",
+    )
+    parser.add_argument(
+        "--canvas", type=parse_canvas,
+        default=(DEFAULT_CANVAS_WIDTH, DEFAULT_CANVAS_HEIGHT),
+        help="输出坐标系宽高，默认 100x100",
+    )
+    parser.add_argument("--workers", type=int, default=1, help="并行线程数，默认 1")
+    parser.add_argument(
+        "--max-detection-size", type=int, default=1200,
+        help="检测前把图缩放到最长边不超过该值；默认 1200，保留 1000px 原图",
+    )
+    parser.add_argument(
+        "--min-primitive-length", type=float, default=1.5,
+        help="过滤短于该值的图元（画布单位），用于去除文字/标注碎片",
+    )
+    parser.add_argument(
+        "--classifier-min-confidence", type=float, default=0.5,
+        help="分类器置信度低于该值时回退忽略类",
+    )
+    parser.add_argument(
+        "--instance-gap", type=float, default=3.0,
+        help="Thing 实例端点聚合容差（画布单位）",
+    )
+    parser.add_argument(
+        "--engine", choices=("segdet", "det", "tpl", "hybrid", "gat", "seg", "v2", "v1"), default="hybrid",
+        help="推理引擎：v2=精确颜色层+平行线优化+ViT（默认），v1=旧颜色先验流程",
+    )
+    parser.add_argument(
+        "--palette", default=str(SCRIPT_DIR / "weights" / "stroke_palette.json"),
+        help="精确描边色调色板（v2）",
+    )
+    parser.add_argument(
+        "--vit", default=str(SCRIPT_DIR / "weights" / "vit_strokes.pt"),
+        help="ViT 对象分类器权重（v2；不存在时退化为全部忽略类）",
+    )
+    parser.add_argument(
+        "--vit-device", default="auto", choices=("auto", "cuda", "cpu"),
+        help="ViT 推理设备，默认自动选择 CUDA",
+    )
+    parser.add_argument(
+        "--confidence", type=float, default=0.35,
+        help="ViT 置信度阈值，低于该值输出忽略类 35",
+    )
+    parser.add_argument(
+        "--color-prior", default=str(SCRIPT_DIR / "weights" / "color_class_prior.json"),
+        help="v2 颜色→类别先验表（与 ViT 概率融合）",
+    )
+    parser.add_argument(
+        "--color-prior-weight", type=float, default=0.6,
+        help="颜色先验融合权重，0 表示关闭",
+    )
+    parser.add_argument(
+        "--class-policy", default=str(SCRIPT_DIR / "weights" / "class_policy.json"),
+        help="逐类阈值与抑制策略（不存在时使用全局阈值）",
+    )
+    parser.add_argument(
+        "--nms-iou", type=float, default=0.6,
+        help="同类假设按掩码 IoU 去重的阈值；0 表示关闭",
+    )
+    parser.add_argument(
+        "--objectness-threshold", type=float, default=0.0,
+        help="IoU/objectness 头的门限；模型无该头时无效",
+    )
+    parser.add_argument(
+        "--segdet-weights", default=str(SCRIPT_DIR / "weights" / "yolo_seg.pt"),
+        help="YOLO-seg 实例分割权重（--engine segdet）",
+    )
+    parser.add_argument(
+        "--segdet-templates", default=str(SCRIPT_DIR / "weights" / "symbol_templates.pkl"),
+        help="segdet 可选的模板库（提供完整候选的几何补全）",
+    )
+    parser.add_argument(
+        "--segdet-template-max-score", type=float, default=3.0,
+        help="segdet 模板拟合的接受阈值",
+    )
+    parser.add_argument(
+        "--inside-fraction", type=float, default=0.5,
+        help="笔画点落在实例掩码内的最小比例（--engine segdet）",
+    )
+    parser.add_argument(
+        "--det-weights", default=str(SCRIPT_DIR / "weights" / "yolo_det.pt"),
+        help="YOLO 检测权重（--engine det）",
+    )
+    parser.add_argument("--det-conf", type=float, default=0.25,
+                        help="YOLO 检测置信度阈值")
+    parser.add_argument("--det-iou", type=float, default=0.5,
+                        help="YOLO NMS IoU 阈值")
+    parser.add_argument(
+        "--tpl-weights", default=str(SCRIPT_DIR / "weights" / "symbol_templates.pkl"),
+        help="符号模板库（--engine tpl）",
+    )
+    parser.add_argument(
+        "--tpl-max-distance", type=float, default=3.0,
+        help="模板拟合的平均点到笔画距离阈值（像素）",
+    )
+    parser.add_argument(
+        "--hybrid-classes", default="8",
+        help="hybrid 引擎中由 GAT 接管的类别（逗号分隔）",
+    )
+    parser.add_argument(
+        "--segdet-classes", default="26,29,15,23,16,10,12",
+        help="hybrid 引擎中由 YOLO-seg 接管的类别",
+    )
+    parser.add_argument(
+        "--suppress-classes", default="2,11,14,17,18,21,22,30,34",
+        help="hybrid 引擎最终抑制的类别（PQ 感知门控）",
+    )
+    parser.add_argument(
+        "--hybrid-segdet-weights", default=str(SCRIPT_DIR / "weights" / "yolo_seg.pt"),
+        help="hybrid 引擎使用的 YOLO-seg 权重（不存在则跳过该分支）",
+    )
+    parser.add_argument(
+        "--gat-weights", default=str(SCRIPT_DIR / "weights" / "gat_primitive.pt"),
+        help="图元级 GAT 权重（--engine gat）",
+    )
+    parser.add_argument(
+        "--gat-edge-threshold", type=float, default=0.45,
+        help="GAT 邻接概率阈值，高于该值视为同实例",
+    )
+    parser.add_argument(
+        "--gat-color-weight", type=float, default=0.5,
+        help="GAT 节点概率与颜色先验的融合权重，0 关闭",
+    )
+    parser.add_argument(
+        "--seg-weights", default=str(SCRIPT_DIR / "weights" / "seg_unet.pt"),
+        help="dense segmentation 权重（--engine seg）",
+    )
+    parser.add_argument(
+        "--seg-threshold", type=float, default=0.30,
+        help="像素置信度阈值，低于该值视为背景",
+    )
+    parser.add_argument(
+        "--seg-min-pixels", type=int, default=12,
+        help="实例最小像素数",
+    )
+    parser.add_argument(
+        "--max-instances", type=int, default=12,
+        help="每图最多保留的 Thing 实例数（按置信度截断）；0 表示不限制",
+    )
+    parser.add_argument("--limit", type=int, default=0, help="只处理前 N 张，0 表示全部")
+    parser.add_argument(
+        "--shard-index", type=int, default=0,
+        help="多进程分片：当前分片序号（0 起），配合 --shard-count 使用",
+    )
+    parser.add_argument(
+        "--shard-count", type=int, default=1,
+        help="多进程分片总数；各分片输出合起来覆盖全部输入",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="随机种子")
+    parser.add_argument("--fail-fast", action="store_true", help="遇到单图错误立即退出")
+    parser.add_argument(
+        "--strict-exit", action="store_true",
+        help="任一单图失败时以非零码退出；默认写出合法空 JSON 后继续",
+    )
+    parser.add_argument(
+        "--allow-network", action="store_true",
+        help="仅限本地准备数据时使用；正式评测不要开启",
+    )
+    parser.add_argument(
+        "--check-only", action="store_true", help="只做模型清单审计后退出",
+    )
+    parser.add_argument(
+        "--external-api", action="store_true",
+        help="开发期可选：通过 OpenAI 兼容端点（Ollama/Qwen）复核语义；"
+             "正式评测禁止开启，且必须同时指定 --allow-network",
+    )
+    parser.add_argument(
+        "--external-url", default="http://10.11.64.137:11434/v1",
+        help="OpenAI 兼容服务基础地址，通常以 /v1 结尾（仅 --external-api 时使用）",
+    )
+    parser.add_argument(
+        "--external-model", default="qwen2.5vl:3b",
+        help="模型名（仅 --external-api 时使用）",
+    )
+    parser.add_argument(
+        "--external-timeout", type=float, default=60.0,
+        help="外部接口超时秒数（仅 --external-api 时使用）",
+    )
+    parser.add_argument(
+        "--summary", default="", help="可选：把运行摘要另存为 JSON",
+    )
+    return parser
+
+
+def _cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def find_pngs(input_path: Path) -> list[Path]:
+    if input_path.is_file():
+        if input_path.suffix.lower() != ".png":
+            raise SystemExit(f"输入文件不是 PNG: {input_path}")
+        return [input_path]
+    if not input_path.is_dir():
+        raise SystemExit(f"输入路径不存在: {input_path}")
+    files = sorted(
+        (path for path in input_path.rglob("*") if path.is_file() and path.suffix.lower() == ".png"),
+        key=lambda path: str(path.relative_to(input_path)).lower(),
+    )
+    if not files:
+        raise SystemExit(f"输入目录没有 PNG: {input_path}")
+    return files
+
+
+def _prepare_environment(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    # 不在启动时导入 torch：本方案默认不用神经网络权重，提前加载 torch 还会
+    # 与 scipy/skimage 的 OpenMP 运行时冲突。若后续 manifest 声明了 torch
+    # 模型，由模型加载代码自行设置种子。
+
+
+def _process_one(
+    path: Path,
+    output_dir: Path,
+    config: InferenceConfig,
+    prior: ColorPrior,
+    classifier: PrimitiveClassifier,
+    canvas: tuple[int, int],
+    refiner=None,
+    *,
+    palette: str | None = None,
+    vit=None,
+    confidence: float = 0.30,
+    seg: dict | None = None,
+    gat: dict | None = None,
+    hybrid: dict | None = None,
+    tpl: dict | None = None,
+    det: dict | None = None,
+    segdet: dict | None = None,
+    color_prior: str | None = None,
+    color_prior_weight: float = 0.0,
+    class_policy: str | None = None,
+    nms_iou: float = 0.0,
+    objectness_threshold: float = 0.0,
+    max_instances: int = 0,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    width, height = canvas
+    if segdet is not None:
+        from cadvec.pipeline_segdet import run_image_segdet
+        result = run_image_segdet(
+            path, segdet["weights"], config, segdet["palette"],
+            canvas_width=width, canvas_height=height,
+            det_conf=segdet["det_conf"], det_iou=segdet["det_iou"],
+            max_instances=segdet["max_instances"],
+            inside_fraction=segdet["inside_fraction"],
+            templates_path=segdet["templates"],
+            template_max_score=segdet["template_max_score"],
+        )
+        write_output(result["data"], output_dir / f"{path.stem}.json")
+        return {"file": path.name, **result["stats"]}
+    if det is not None:
+        from cadvec.pipeline_det import run_image_det
+        result = run_image_det(
+            path, det["det_weights"], det["templates"], config, det["palette"],
+            canvas_width=width, canvas_height=height,
+            det_conf=det["det_conf"], det_iou=det["det_iou"],
+            max_distance_px=det["max_distance"], max_instances=det["max_instances"],
+        )
+        write_output(result["data"], output_dir / f"{path.stem}.json")
+        return {"file": path.name, **result["stats"]}
+    if tpl is not None:
+        from cadvec.pipeline_tpl import run_image_tpl
+        result = run_image_tpl(
+            path, tpl["gat_weights"], tpl["templates"], tpl["device"], config,
+            tpl["palette"],
+            canvas_width=width, canvas_height=height,
+            confidence=tpl["confidence"], edge_threshold=tpl["edge_threshold"],
+            color_prior_path=tpl["color_prior"], color_prior_weight=tpl["color_weight"],
+            class_policy_path=tpl["class_policy"],
+            max_instances=tpl["max_instances"], max_distance_px=tpl["max_distance"],
+        )
+        write_output(result["data"], output_dir / f"{path.stem}.json")
+        return {"file": path.name, **result["stats"]}
+    if hybrid is not None:
+        from cadvec.hybrid import merge_final
+        from cadvec.pipeline_gat import run_image_gat
+        from cadvec.pipeline_v2 import run_image_v2
+        gat_options = hybrid["gat"]
+        v2_result = run_image_v2(
+            path, config, hybrid["palette"], hybrid["vit"],
+            canvas_width=width, canvas_height=height,
+            confidence_threshold=hybrid["confidence"],
+            color_prior_path=hybrid["color_prior"],
+            color_prior_weight=hybrid["color_weight"],
+            class_policy_path=hybrid["class_policy"],
+            nms_iou=hybrid["nms_iou"],
+            max_instances=hybrid["max_instances"],
+        )
+        gat_result = run_image_gat(
+            path, gat_options["weights"], gat_options["device"], config,
+            gat_options["palette"],
+            canvas_width=width, canvas_height=height,
+            confidence=gat_options["confidence"],
+            edge_threshold=gat_options["edge_threshold"],
+            max_instances=gat_options["gat_max_instances"],
+            color_prior_path=gat_options["color_prior"],
+            color_prior_weight=gat_options["color_weight"],
+            class_policy_path=gat_options["class_policy"],
+        )
+        segdet_data = None
+        if hybrid.get("segdet") is not None:
+            from cadvec.pipeline_segdet import run_image_segdet
+            segdet_options = hybrid["segdet"]
+            segdet_data = run_image_segdet(
+                path, segdet_options["weights"], config, segdet_options["palette"],
+                canvas_width=width, canvas_height=height,
+                det_conf=segdet_options["det_conf"], det_iou=segdet_options["det_iou"],
+                max_instances=segdet_options["max_instances"],
+                inside_fraction=segdet_options["inside_fraction"],
+                templates_path=None,
+            )["data"]
+        data = merge_final(
+            v2_result.data, gat_result["data"], segdet_data,
+            gat_classes=hybrid["classes"],
+            segdet_classes=hybrid["segdet_classes"],
+            suppress=hybrid["suppress"],
+        )
+        write_output(data, output_dir / f"{path.stem}.json")
+        return {
+            "file": path.name,
+            "primitive_count": len(data["commands"]),
+            "hypotheses": v2_result.hypotheses,
+            "objects": gat_result["stats"].get("instances", 0),
+            "seconds": round(time.perf_counter() - started, 3),
+            "command_counts": {"line": len(data["commands"]), "arc": 0,
+                               "circle": 0, "ellipse": 0},
+        }
+    if gat is not None:
+        from cadvec.pipeline_gat import run_image_gat
+        result = run_image_gat(
+            path, gat["weights"], gat["device"], config, gat["palette"],
+            canvas_width=width, canvas_height=height,
+            confidence=gat["confidence"], edge_threshold=gat["edge_threshold"],
+            max_instances=gat["max_instances"],
+            color_prior_path=gat["color_prior"],
+            color_prior_weight=gat["color_weight"],
+            class_policy_path=gat["class_policy"],
+        )
+        write_output(result["data"], output_dir / f"{path.stem}.json")
+        return {"file": path.name, **result["stats"]}
+    if seg is not None:
+        from cadvec.pipeline_seg import run_image_seg
+        result = run_image_seg(
+            path, seg["weights"], seg["device"], config,
+            canvas_width=width, canvas_height=height,
+            threshold=seg["threshold"], min_pixels=seg["min_pixels"],
+            max_instances=seg["max_instances"],
+        )
+        write_output(result["data"], output_dir / f"{path.stem}.json")
+        return {"file": path.name, **result["stats"]}
+    if palette is not None:
+        from cadvec.pipeline_v2 import run_image_v2
+        result = run_image_v2(
+            path, config, palette, vit,
+            canvas_width=width, canvas_height=height,
+            confidence_threshold=confidence,
+            color_prior_path=color_prior,
+            color_prior_weight=color_prior_weight,
+            class_policy_path=class_policy,
+            nms_iou=nms_iou,
+            objectness_threshold=objectness_threshold,
+            max_instances=max_instances,
+        )
+    else:
+        result = run_image(
+            path, config, prior, classifier,
+            canvas_width=width, canvas_height=height, refiner=refiner,
+        )
+    write_output(result.data, output_dir / f"{path.stem}.json")
+    return {
+        "file": path.name,
+        "seconds": round(time.perf_counter() - started, 3),
+        **result.stats,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.external_api and not args.allow_network:
+        print(
+            "[错误] --external-api 必须与 --allow-network 同时使用；"
+            "正式评测禁止调用外部模型接口",
+            file=sys.stderr,
+        )
+        return 2
+    if not args.allow_network:
+        enable_offline_guard()
+
+    _prepare_environment(args.seed)
+
+    try:
+        report = audit_models(args.weights)
+    except ModelComplianceError as error:
+        print(f"[合规检查失败] {error}", file=sys.stderr)
+        return 2
+    if not report.ok:
+        print(f"[合规检查失败] 模型参数量 {report.total_parameters} 超过上限", file=sys.stderr)
+        return 2
+    if args.check_only:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2))
+        return 0
+
+    input_path = Path(args.input)
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    files = find_pngs(input_path)
+    if args.limit > 0:
+        files = files[: args.limit]
+
+    stems: dict[str, Path] = {}
+    for path in files:
+        if path.stem in stems:
+            print(
+                f"[错误] 输入中有重名文件 {path.name} 与 {stems[path.stem].name}，"
+                "输出 JSON 会互相覆盖",
+                file=sys.stderr,
+            )
+            return 2
+        stems[path.stem] = path
+
+    if args.shard_count > 1:
+        if not 0 <= args.shard_index < args.shard_count:
+            print("[错误] --shard-index 必须满足 0 <= index < shard-count", file=sys.stderr)
+            return 2
+        files = [
+            path for index, path in enumerate(files)
+            if index % args.shard_count == args.shard_index
+        ]
+        if not files:
+            print(f"[错误] 分片 {args.shard_index}/{args.shard_count} 没有输入文件", file=sys.stderr)
+            return 2
+
+    config = InferenceConfig(
+        canvas_width=args.canvas[0], canvas_height=args.canvas[1],
+        seed=args.seed, weights_dir=Path(args.weights),
+        max_detection_size=max(8, args.max_detection_size),
+        min_primitive_length=max(0.0, args.min_primitive_length),
+        classifier_min_confidence=min(1.0, max(0.0, args.classifier_min_confidence)),
+        instance_gap=max(0.0, args.instance_gap),
+    )
+    prior = ColorPrior.load(args.weights, config)
+    classifier = PrimitiveClassifier.load(args.weights)
+    palette_path = None
+    vit = None
+    seg_options = None
+    gat_options = None
+    hybrid_options = None
+    tpl_options = None
+    det_options = None
+    segdet_options = None
+    if args.engine == "segdet":
+        if not Path(args.segdet_weights).exists():
+            print(f"[错误] 缺少 YOLO-seg 权重 {args.segdet_weights}", file=sys.stderr)
+            return 2
+        segdet_options = {
+            "weights": args.segdet_weights, "palette": args.palette,
+            "det_conf": args.det_conf, "det_iou": args.det_iou,
+            "max_instances": args.max_instances,
+            "inside_fraction": args.inside_fraction,
+            "templates": args.segdet_templates,
+            "template_max_score": args.segdet_template_max_score,
+        }
+        print("实例分割引擎（YOLO-seg + 笔画矢量化）", file=sys.stderr)
+    if args.engine == "det":
+        if not Path(args.det_weights).exists() or not Path(args.tpl_weights).exists():
+            print("[错误] det 引擎需要 YOLO 权重与模板库", file=sys.stderr)
+            return 2
+        det_options = {
+            "det_weights": args.det_weights, "templates": args.tpl_weights,
+            "palette": args.palette, "det_conf": args.det_conf, "det_iou": args.det_iou,
+            "max_distance": args.tpl_max_distance, "max_instances": args.max_instances,
+        }
+        print("检测+模板拟合引擎（YOLO + 模板库）", file=sys.stderr)
+    if args.engine == "tpl":
+        if not Path(args.gat_weights).exists() or not Path(args.tpl_weights).exists():
+            print("[错误] tpl 引擎需要 GAT 权重与模板库", file=sys.stderr)
+            return 2
+        device_name = "cuda" if (args.vit_device in ("auto", "cuda") and _cuda_available()) else "cpu"
+        tpl_options = {
+            "gat_weights": args.gat_weights, "templates": args.tpl_weights,
+            "device": device_name, "palette": args.palette,
+            "confidence": 0.3, "edge_threshold": args.gat_edge_threshold,
+            "color_prior": args.color_prior, "color_weight": args.gat_color_weight,
+            "class_policy": args.class_policy, "max_instances": args.max_instances,
+            "max_distance": args.tpl_max_distance,
+        }
+        print(f"模板拟合引擎（GAT 候选 + 模板库），设备 {device_name}", file=sys.stderr)
+    if args.engine == "hybrid":
+        if not Path(args.gat_weights).exists() or not Path(args.vit).exists():
+            print("[错误] hybrid 引擎需要 GAT 与 ViT 权重", file=sys.stderr)
+            return 2
+        device_name = "cuda" if (args.vit_device in ("auto", "cuda") and _cuda_available()) else "cpu"
+        from cadvec.vit import VitClassifier
+        vit = VitClassifier.load(args.vit, device=device_name)
+        hybrid_options = {
+            "palette": args.palette,
+            "vit": vit,
+            "confidence": args.confidence,
+            "color_prior": args.color_prior,
+            "color_weight": args.color_prior_weight,
+            "class_policy": args.class_policy,
+            "nms_iou": args.nms_iou,
+            "max_instances": args.max_instances,
+            "classes": {int(value) for value in args.hybrid_classes.split(",") if value.strip()},
+            "segdet_classes": {int(value) for value in args.segdet_classes.split(",") if value.strip()},
+            "suppress": {int(value) for value in args.suppress_classes.split(",") if value.strip()},
+            "segdet": {
+                "weights": args.hybrid_segdet_weights,
+                "palette": args.palette,
+                "det_conf": 0.2,
+                "det_iou": 0.5,
+                "max_instances": 10,
+                "inside_fraction": 0.35,
+            } if Path(args.hybrid_segdet_weights).exists() else None,
+            "gat": {
+                "weights": args.gat_weights,
+                "device": device_name,
+                "palette": args.palette,
+                "confidence": 0.3,
+                "edge_threshold": args.gat_edge_threshold,
+                "gat_max_instances": 8,
+                "color_prior": args.color_prior,
+                "color_weight": args.gat_color_weight,
+                "class_policy": args.class_policy,
+            },
+        }
+        palette_path = args.palette
+        print(f"hybrid 引擎（GAT classes {sorted(hybrid_options['classes'])}），"
+              f"设备 {device_name}", file=sys.stderr)
+    if args.engine == "gat":
+        if not Path(args.gat_weights).exists():
+            print(f"[错误] 缺少 GAT 权重 {args.gat_weights}", file=sys.stderr)
+            return 2
+        if not Path(args.palette).exists():
+            print(f"[错误] 缺少调色板 {args.palette}", file=sys.stderr)
+            return 2
+        device_name = "cuda" if (args.vit_device in ("auto", "cuda") and _cuda_available()) else "cpu"
+        gat_options = {
+            "weights": args.gat_weights, "device": device_name,
+            "palette": args.palette, "confidence": args.confidence,
+            "edge_threshold": args.gat_edge_threshold,
+            "max_instances": args.max_instances,
+            "color_prior": args.color_prior,
+            "color_weight": args.gat_color_weight,
+            "class_policy": args.class_policy,
+        }
+        print(f"图元级 GAT 引擎，设备 {device_name}", file=sys.stderr)
+    if args.engine == "seg":
+        if not Path(args.seg_weights).exists():
+            print(f"[错误] 缺少 segmentation 权重 {args.seg_weights}", file=sys.stderr)
+            return 2
+        device_name = "cuda" if (args.vit_device in ("auto", "cuda") and _cuda_available()) else "cpu"
+        seg_options = {
+            "weights": args.seg_weights, "device": device_name,
+            "threshold": args.seg_threshold, "min_pixels": args.seg_min_pixels,
+            "max_instances": args.max_instances,
+        }
+        print(f"dense segmentation 引擎，设备 {device_name}", file=sys.stderr)
+    if args.engine == "v2":
+        if Path(args.palette).exists():
+            palette_path = args.palette
+            from cadvec.vit import VitClassifier
+            device = None
+            if args.vit_device != "auto":
+                device = args.vit_device
+            vit = VitClassifier.load(args.vit, device=device)
+            if vit is None:
+                print(
+                    f"[警告] 未找到 ViT 权重 {args.vit}，v2 将只做几何提取、"
+                    "所有图元输出忽略类 35",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"ViT 设备: {vit.device}", file=sys.stderr)
+        else:
+            print(
+                f"[警告] 未找到调色板 {args.palette}，回退到 v1 引擎",
+                file=sys.stderr,
+            )
+    refiner = load_refiner(ExternalApiConfig(
+        enabled=args.external_api,
+        base_url=args.external_url,
+        model=args.external_model,
+        timeout=args.external_timeout,
+    ))
+
+    print(
+        f"离线推理: {len(files)} 张 PNG，画布 {args.canvas[0]}x{args.canvas[1]}，"
+        f"颜色先验 {len(prior.entries)} 条，分类器 {'启用' if classifier.available else '未启用'}，"
+        f"外部接口 {'启用' if refiner is not None else '关闭'}",
+        file=sys.stderr,
+    )
+
+    started = time.perf_counter()
+    errors: list[dict[str, str]] = []
+    processed = 0
+    progress_lock = threading.Lock()
+    width, height = args.canvas
+
+    def handle(path: Path) -> dict[str, Any]:
+        nonlocal processed
+        stats: dict[str, Any] = {"file": path.name}
+        try:
+            stats = _process_one(
+                path, output_dir, config, prior, classifier, args.canvas, refiner,
+                palette=palette_path, vit=vit, confidence=args.confidence,
+                seg=seg_options,
+                gat=gat_options,
+                hybrid=hybrid_options,
+                tpl=tpl_options,
+                det=det_options,
+                segdet=segdet_options,
+                color_prior=args.color_prior, color_prior_weight=args.color_prior_weight,
+                class_policy=args.class_policy, nms_iou=args.nms_iou,
+                objectness_threshold=args.objectness_threshold,
+                max_instances=args.max_instances,
+            )
+        except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
+            if args.fail_fast:
+                raise
+            write_output(empty_output(width, height), output_dir / f"{path.stem}.json")
+            detail = {
+                "file": path.name,
+                "error": f"{type(error).__name__}: {error}",
+                "traceback": traceback.format_exc(limit=3),
+            }
+            with progress_lock:
+                errors.append(detail)
+        with progress_lock:
+            processed += 1
+            if processed == len(files) or processed % 25 == 0:
+                print(f"  进度 {processed}/{len(files)}", file=sys.stderr)
+        return stats
+
+    results: list[dict[str, Any]] = []
+    if args.workers <= 1:
+        for path in files:
+            results.append(handle(path))
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+            futures = {executor.submit(handle, path): path for path in files}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    elapsed = time.perf_counter() - started
+    commands = {"line": 0, "arc": 0, "circle": 0, "ellipse": 0}
+    primitives = 0
+    for item in results:
+        for key, value in (item.get("command_counts") or {}).items():
+            commands[key] = commands.get(key, 0) + int(value)
+        primitives += int(item.get("primitive_count", 0))
+
+    summary = {
+        "input": str(input_path),
+        "output": str(output_dir),
+        "images": len(files),
+        "errors": len(errors),
+        "elapsed_seconds": round(elapsed, 3),
+        "seconds_per_image": round(elapsed / max(len(files), 1), 3),
+        "primitives": primitives,
+        "command_counts": commands,
+        "model_parameters": report.total_parameters,
+        "offline_guard": not args.allow_network,
+        "external_api": bool(args.external_api),
+    }
+    if errors:
+        summary["error_samples"] = errors[:5]
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.summary:
+        Path(args.summary).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.summary).write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        )
+    return 1 if (errors and args.strict_exit) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

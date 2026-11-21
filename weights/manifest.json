@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "limit": 5000000000,
+  "total_parameters": 6666931,
+  "external_network_required": false,
+  "external_apis": [],
+  "models": [
+    {
+      "name": "stroke-vit",
+      "kind": "vit-classifier",
+      "path": "vit_strokes.pt",
+      "parameters": 2911525,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "小型 ViT 对象分类器（4 通道 224×224，patch16、宽192、6层、6头），含 IoU/objectness 回归头；输出 36 类语义（35 为忽略）与预测 IoU。"
+    },
+    {
+      "name": "instance-seg",
+      "kind": "yolo-seg",
+      "path": "yolo_seg.pt",
+      "parameters": 3399033,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "YOLOv8n-seg 实例分割（GT 实例凸包监督），为像素管线提供完整实例候选；用于 --engine segdet。"
+    },
+    {
+      "name": "primitive-gat",
+      "kind": "graph-attention",
+      "path": "gat_primitive.pt",
+      "parameters": 356373,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "图元级 GAT 全景检测（节点=笔画，14 维几何 + 256 维 ResNet18 图像特征，极坐标边编码，语义+邻接双头），用于 --engine gat / hybrid。"
+    },
+    {
+      "name": "stroke-palette",
+      "kind": "color-palette",
+      "path": "stroke_palette.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "训练集 SVG 精确描边色调色板（197 色），用于抗锯齿 alpha 反混合后的颜色恢复。"
+    },
+    {
+      "name": "class-policy",
+      "kind": "decision-policy",
+      "path": "class_policy.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "逐类阈值与低精度类抑制（校准集统计），0 参数。"
+    },
+    {
+      "name": "color-class-prior",
+      "kind": "color-lookup-table",
+      "path": "color_class_prior.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "训练集 SVG 统计的描边色→类别分布，用于与 ViT 概率融合（v2）。"
+    },
+    {
+      "name": "color-prior",
+      "kind": "color-lookup-table",
+      "path": "color_prior.json",
+      "parameters": 0,
+      "optional": true,
+      "description": "v1 颜色先验查找表；v2 引擎不依赖它，保留用于兼容。"
+    }
+  ]
+}

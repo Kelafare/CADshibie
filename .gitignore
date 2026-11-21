@@ -1,0 +1,21 @@
+# 数据与实验产物（不随仓库发布）
+datasets/
+datasets.tar.gz
+_work/
+eval_run/
+results/
+runs/
+*.tar.gz
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# 报告与中间文件
+*.pdf
+*.docx
+*.pptx

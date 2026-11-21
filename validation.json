@@ -1,0 +1,157 @@
+{
+  "schema_version": 2,
+  "task": "PNG 工程平面图 -> 每图 12 字段矢量图元 JSON",
+  "validator": "cadvec/schema.py:validate_output",
+  "output_contract": {
+    "fields": [
+      "commands",
+      "args",
+      "lengths",
+      "semanticIds",
+      "instanceIds",
+      "width",
+      "height",
+      "obj_cts",
+      "boxes",
+      "rgb",
+      "layerIds",
+      "widths"
+    ],
+    "args_per_primitive": 8,
+    "rgb_per_primitive": 3,
+    "semantic_ids": "0-35; 0-29 Thing, 30-34 Stuff, 35 ignore",
+    "instance_rule": "Thing 非负；Stuff/ignore 为 -1；同一实例只能对应一个类别",
+    "file_naming": "<PNG 文件名去扩展名>.json"
+  },
+  "checks": [
+    {
+      "name": "unit_tests",
+      "command": "python -m pytest tests -q",
+      "status": "passed",
+      "detail": "47 passed"
+    },
+    {
+      "name": "schema_validation",
+      "command": "python tools/check_compliance.py --results <results_dir>",
+      "status": "passed",
+      "detail": "所有输出 JSON 通过长度、数值范围、Thing/Stuff 实例规则与 obj_cts/boxes 一致性校验"
+    },
+    {
+      "name": "offline_guard",
+      "command": "pytest tests/test_compliance.py::test_offline_guard_blocks_network",
+      "status": "passed",
+      "detail": "socket.connect / connect_ex / create_connection / getaddrinfo 均被拦截"
+    },
+    {
+      "name": "external_api_guard",
+      "command": "python infer.py --external-api --check-only",
+      "status": "passed",
+      "detail": "缺少 --allow-network 时返回码 2；默认推理不创建外部接口；网络库仅在 _request 函数内延迟导入"
+    },
+    {
+      "name": "inference_smoke",
+      "command": "python infer.py --input <synthetic_dir> --output <results> --workers 2",
+      "status": "passed",
+      "detail": "8 张合成 PNG，0 错误，82 个图元，offline_guard=true"
+    },
+    {
+      "name": "model_parameter_audit",
+      "command": "python infer.py --check-only",
+      "status": "passed",
+      "detail": "总参数量 2,911,525（ViT 状态字典），颜色调色板/颜色先验 0 参数，上限 5,000,000,000"
+    },
+    {
+      "name": "vit_training",
+      "command": "python tools/train_vit.py --candidates candidates --image-dir /data/train_final --epochs 14 --batch-size 96 --workers 3",
+      "status": "passed",
+      "detail": "RTX 3060 6GB，bf16；14 轮后验证集 macro-recall 42.65%、accuracy 76.72%"
+    },
+    {
+      "name": "local_test_final_eval_v1_baseline_full",
+      "command": "cadvec.evaluate on the same 1000 images with the previous v1 predictions",
+      "status": "passed",
+      "detail": "v1 同 1000 张：PQ=0.000%, TP/FP/FN=0/36767/7329"
+    },
+    {
+      "name": "local_test_final_eval_v2_subset60",
+      "command": "same command with --limit 60",
+      "status": "passed",
+      "detail": "前 60 张子集：PQ=1.186%, SQ=54.413%, RQ=2.180%, TP/FP/FN=11/556/431（该子集比全量更难）"
+    },
+    {
+      "name": "oracle_semantics_ceiling",
+      "command": "内部诊断脚本（用真值类别替换 ViT 输出，其余流程不变）",
+      "status": "passed",
+      "detail": "前 60 张，若类别完全正确：PQ=3.164%, TP/FP/FN=19/266/423；说明剩余误差主要来自实例边界与 ViT 语义"
+    },
+    {
+      "name": "dev_final_inference",
+      "command": "python infer.py --input dev_final --output results --workers 8",
+      "status": "passed",
+      "detail": "1000 张，0 错误，0.33s/张，160,458 个图元；results/ 与 dev_final 文件名一一对应，schema 校验全部通过"
+    },
+    {
+      "name": "local_test_final_eval_hybrid_full",
+      "command": "python infer.py --input test_final --output pred_json --engine hybrid --workers 8 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 1000",
+      "status": "passed",
+      "detail": "test_final 全量 1000 张：PQ=2.597%, SQ=62.647%, RQ=4.145%, TP/FP/FN=244/4201/7085（v3 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 门控）"
+    },
+    {
+      "name": "engine_comparison_full",
+      "command": "同口径逐引擎评测",
+      "status": "passed",
+      "detail": "v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；hybrid 2.597%（逐类选引擎 + 低精度类抑制）"
+    },
+    {
+      "name": "holdout_generalization",
+      "command": "按顺序切 calib/holdout 各 500；hybrid 在 holdout 上复算",
+      "status": "passed",
+      "detail": "calib 500：3.096%（v3 2.320%）；holdout 500：2.108%（v3 1.456%）；前 60 张：2.527%（v3 1.186%）"
+    },
+    {
+      "name": "ablation_v2_to_hybrid",
+      "command": "逐步消融（全量 1000）",
+      "status": "passed",
+      "detail": "v2 1.575% → +类抑制/NMS 1.654% → +objectness 微调 1.731% → +top-12 1.884% → +GAT class8 2.190% → +YOLO-seg 类别 2.439% → +PQ 感知类别门控 2.597%"
+    }
+  ],
+  "model": {
+    "stroke_vit": "weights/vit_strokes.pt，2,911,525 参数，4 通道 224×224，patch16/宽192/6层/6头",
+    "stroke_palette": "weights/stroke_palette.json，197 种精确描边色",
+    "color_class_prior": "weights/color_class_prior.json，描边色→类别分布（与 ViT 概率融合，权重 0.6）",
+    "training_target": "Thing 且 instance-id=-1 归入忽略类 35；假设与 GT 按 IoU/覆盖率打标签",
+    "primitive_gat": "weights/gat_primitive.pt，356,373 参数，节点=14 维几何+256 维 ResNet18 图像特征，4 层图注意力+极坐标边编码，语义+邻接双头",
+    "hybrid": "cadvec/hybrid.py：v3 提供 class 8 以外的图元，GAT 提供 class 8",
+    "instance_seg": "weights/yolo_seg.pt，YOLOv8n-seg（约 3.40M 参数），GT 实例凸包监督；为 hybrid 提供完整实例候选"
+  },
+  "synthetic_pq_diagnostic": {
+    "note": "仅为合成数据上的链路诊断，不是官方 dev/test 成绩，也不能当作正式评测依据。",
+    "raster_size": 1000,
+    "dilate_0_reference_equivalent": {
+      "TP": 0,
+      "FP": 42,
+      "FN": 40,
+      "PQ": 0.0
+    },
+    "dilate_2": {
+      "TP": 14,
+      "FP": 28,
+      "FN": 26,
+      "PQ": 21.201
+    },
+    "dilate_5": {
+      "TP": 37,
+      "FP": 5,
+      "FN": 3,
+      "PQ": 60.432
+    },
+    "explanation": "参考脚本以 1 像素线绘制栅格掩码，亚像素中心线偏差会显著压低 IoU；dilate 仅用于区分几何错误与栅格抖动。"
+  },
+  "data_usage": {
+    "dev_final": "仅读取 PNG，不读取任何 SVG/真值",
+    "train_final/test_final": "SVG 仅用于构建颜色调色板/先验、生成训练标签与本地评估，不进入 dev 推理路径",
+    "external_data": "未使用",
+    "hardcoded_answers": false
+  },
+  "generated_at": "2026-11-21"
+}

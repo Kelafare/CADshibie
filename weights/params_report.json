@@ -1,0 +1,76 @@
+{
+  "ok": true,
+  "problems": [],
+  "models": {
+    "ok": true,
+    "total_parameters": 6666931,
+    "limit": 5000000000,
+    "manifest": "weights\\manifest.json",
+    "models": [
+      {
+        "name": "stroke-vit",
+        "kind": "vit-classifier",
+        "path": "vit_strokes.pt",
+        "parameters": 2911525,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 11675616
+      },
+      {
+        "name": "instance-seg",
+        "kind": "yolo-seg",
+        "path": "yolo_seg.pt",
+        "parameters": 3399033,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7074920
+      },
+      {
+        "name": "primitive-gat",
+        "kind": "graph-attention",
+        "path": "gat_primitive.pt",
+        "parameters": 356373,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 1442274
+      },
+      {
+        "name": "stroke-palette",
+        "kind": "color-palette",
+        "path": "stroke_palette.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 2957
+      },
+      {
+        "name": "class-policy",
+        "kind": "decision-policy",
+        "path": "class_policy.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 942
+      },
+      {
+        "name": "color-class-prior",
+        "kind": "color-lookup-table",
+        "path": "color_class_prior.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 16036
+      },
+      {
+        "name": "color-prior",
+        "kind": "color-lookup-table",
+        "path": "color_prior.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 55770
+      }
+    ]
+  },
+  "result_files": 1000
+}

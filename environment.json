@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "target_platform": "64-bit Linux, offline",
+  "container_base": "python:3.13-slim",
+  "python": {
+    "local_tested": "3.13.14",
+    "container": "3.13.x"
+  },
+  "dependencies": {
+    "numpy": "2.2.6",
+    "Pillow": "11.3.0",
+    "scipy": "1.15.3",
+    "scikit-image": "0.25.2",
+    "scikit-learn": "1.6.1",
+    "joblib": "1.4.2",
+    "opencv-python-headless": "4.11.0.86",
+    "torch": "2.6.0",
+    "ultralytics": "8.4.216"
+  },
+  "hardware": {
+    "cpu_only": false,
+    "gpu_used_for": "ViT 分类器推理与训练",
+    "gpu_model": "NVIDIA GeForce RTX 3060 Laptop GPU (6GB, CUDA 12.4)",
+    "gpu_required": false,
+    "cpu_fallback": true,
+    "estimated_memory_mb": 2048,
+    "model_weight_bytes": 20500000
+  },
+  "network": {
+    "required_at_runtime": false,
+    "external_apis": [],
+    "offline_guard": "compliance/net_guard.py",
+    "manifest_flag": "weights/manifest.json: external_network_required=false"
+  },
+  "runtime_reference": {
+    "input": "1000x1000 test_final PNG",
+    "workers": 4,
+    "seconds_per_image": 1.05,
+    "device": "CPU 几何 + RTX 3060 ViT",
+    "note": "v2 引擎：精确颜色层 + 平行线优化 + ViT；--workers 4 时约 1s/张。"
+  }
+}
