@@ -3,7 +3,7 @@
   "problems": [],
   "models": {
     "ok": true,
-    "total_parameters": 6666931,
+    "total_parameters": 17249598,
     "limit": 5000000000,
     "manifest": "weights\\manifest.json",
     "models": [
@@ -33,6 +33,15 @@
         "parameter_source": "torch-state-dict",
         "exists": true,
         "size_bytes": 1442274
+      },
+      {
+        "name": "resnet18-feature-trunk",
+        "kind": "cnn-feature-backbone",
+        "path": "resnet18_layer3.pt",
+        "parameters": 2787279,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 11177720
       },
       {
         "name": "stroke-palette",
@@ -69,8 +78,61 @@
         "parameter_source": "manifest",
         "exists": true,
         "size_bytes": 55770
+      },
+      {
+        "name": "roi-ink-refiner",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7826102
+      },
+      {
+        "name": "roi-ink-quality",
+        "kind": "decision-policy",
+        "path": "roi_ink_quality.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 334
+      },
+      {
+        "name": "roi-ink-refiner-all",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink_all.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7826886
+      },
+      {
+        "name": "roi-ink-refiner-256",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink_256.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7826986
+      },
+      {
+        "name": "roi-quality",
+        "kind": "decision-policy",
+        "path": "roi_quality.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 19168
+      },
+      {
+        "name": "roi-ink-refiner-c2",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink_c2.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7826786
       }
     ]
-  },
-  "result_files": 1000
+  }
 }

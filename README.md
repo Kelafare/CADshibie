@@ -10,10 +10,12 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 2.597%**，SQ 62.647%，
-  RQ 4.145%，TP/FP/FN = 244/4201/7085。
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 18.235%**，SQ 68.557%，
+  RQ 26.598%，TP/FP/FN = 1648/3415/5681（hybrid + class 8 门控 +
+  class2 专用/256 ROI 细化 + 学习式与几何双重质量门控）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
-  （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 门控）。
+  （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
+  + class 8 检测掩码门控 + ROI 实例墨迹细化）。
 - 方法、消融和文献路线见 `METHOD.md`、`OPTIMIZATION.md`、`RESEARCH_PLAN.md`。
 - 依赖：`pip install -r requirements.txt`（GPU 可选，自动回退 CPU）。
 - 离线合规：`python tools/check_compliance.py`。
@@ -139,9 +141,9 @@ python infer.py --input /data/dev_final --output /results \
 
 | 参数 | 说明 |
 |---|---|
-| `--engine hybrid` | 默认/推荐：v3 像素管线 ∪ GAT(class 8) ∪ YOLO-seg(指定类别) + PQ 门控 |
+| `--engine hybrid` | 默认/推荐：v3 像素管线 ∪ GAT(class 8) ∪ YOLO-seg(指定类别) + PQ 类别门控 + class 8 检测掩码门控 |
 | `--engine gat` | 图元级 GAT 全景检测（`weights/gat_primitive.pt`） |
-| `--engine v2` | 默认引擎：精确颜色恢复 + 平行线优化 + ViT（需 `weights/vit_strokes.pt`） |
+| `--engine v2` | 像素管线：精确颜色恢复 + 平行线优化 + ViT（需 `weights/vit_strokes.pt`）；hybrid 的底引擎 |
 | `--engine v1` | 旧引擎：颜色先验 + sklearn 树模型，保留用于对比 |
 | `--palette PATH` | v2 描边色调色板，默认 `weights/stroke_palette.json` |
 | `--vit PATH` | v2 ViT 权重，默认 `weights/vit_strokes.pt` |
@@ -164,6 +166,17 @@ python infer.py --input /data/dev_final --output /results \
 | `--min-primitive-length 1.5` | 过滤短图元（画布单位），去除文字/尺寸标注碎片 |
 | `--classifier-min-confidence 0.5` | 分类器置信度低于该值时回退忽略类 35 |
 | `--instance-gap 3.0` | Thing 实例端点聚合容差（画布单位） |
+| `--segdet-mode whole/local` | YOLO 笔画归属：`whole` 整条认领（默认）；`local` 按掩码边界切分（实验项） |
+| `--hybrid-gate-classes 8` | 实例级门控类别：class 8 实例必须被 YOLO-seg 同类检测掩码覆盖，否则丢弃；空串关闭 |
+| `--hybrid-gate-threshold 0.1` | 门控最小重叠比例 |
+| `--hybrid-gate-metric cover/iou` | 重叠度量：`cover`=交集/较小面积（默认），`iou`=标准 IoU |
+| `--roi-ink-weights PATH` | ROI 实例墨迹细化权重，默认 `weights/roi_ink.pt`；缺失则关闭 |
+| `--roi-ink-classes 2` | 主 ROI 权重（class 2 专用 192 模型）负责的类别 |
+| `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,22,25,27,28` | 256 ROI 权重负责的类别 |
+| `--roi-ink-device auto/cuda/cpu` | 细化器设备，默认自动 CUDA |
+| `--roi-ink-quality PATH` | 细化实例几何质量门限 JSON，默认 `weights/roi_ink_quality.json`；缺失则不过滤 |
+| `--roi-ink-weights-aux PATH` | 可选第二套 ROI 权重（默认关闭；28 类 192 模型用于消融） |
+| `--roi-ink-aux-classes` | 第二套权重负责的类别，默认空 |
 
 ## 4. 方法（3 页内说明）
 
@@ -204,7 +217,7 @@ v2 引擎（默认）分五步，详细说明见 `METHOD.md`：
 | 规则要求 | 本提交的做法 |
 |---|---|
 | 64 位 Linux、离线运行 | `Dockerfile` 基于 `python:3.13-slim`；`infer.py` 启动即安装 socket 防护；`manifest` 声明 `external_network_required=false`；无外部 API |
-| 模型参数总量 ≤ 5B | ViT 2,911,525 + 兼容树模型 848,532 = 3,759,864；见 `weights/manifest.json` 与 `params_report.json`；`compliance/params.py` 启动审计 |
+| 模型参数总量 ≤ 5B | 审计总量 17,249,598（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 四套 ROI 墨迹 U-Net 各 1,948,847）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
 | 容器、启动命令、依赖版本、模型清单 | `Dockerfile`、`run.sh`、`requirements.txt`、`weights/manifest.json`、`environment.json` |
 | 验证 JSON | `validation.json` 记录输出契约、测试/自检结果；`infer.py` 输出逐图 JSON 并由 `validate_output` 校验 |
 | 仅使用主办方数据 | 只使用 `train_final`/`test_final` 的 SVG 构建先验与可选分类器，`dev_final` 只读 PNG；未使用任何外部数据 |
@@ -294,6 +307,11 @@ python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 10
 
 - `stroke_palette.json`：训练集 SVG 的 197 种精确描边色（约 3KB，0 参数）；
 - `vit_strokes.pt`：小型 ViT 对象分类器（2,911,525 参数，约 12MB）；
+- `yolo_seg.pt` / `gat_primitive.pt` / `resnet18_layer3.pt`：hybrid 的实例分割、图元 GAT 与图像特征主干；
+- `roi_ink_c2.pt` / `roi_ink_256.pt`：ROI 实例墨迹 U-Net（各 1.95M 参数）；
+  默认 class 2 专用模型负责 class 2，256 模型负责 8/12/14/15/18/19/20/21/22/25/27/28；
+  `roi_ink.pt` / `roi_ink_all.pt` 保留用于消融；
+- `roi_quality.json`：学习式 ROI 实例质量门控（逐类逻辑回归，15 维概率/几何特征）；
 - `color_prior.json`：v1 颜色查找表（0 参数，保留兼容）。
 
 训练/重建命令：
@@ -305,6 +323,9 @@ python tools/build_candidates.py --png-dir /data/train_final --svg-dir /data/tra
 python tools/train_vit.py --candidates candidates --image-dir /data/train_final \
   --out weights/vit_strokes.pt --epochs 12 --batch-size 96 --workers 3
 python tools/check_compliance.py --results results --out weights/params_report.json
+# ROI 实例墨迹细化（GPU）
+python tools/build_roi_ink.py --png-dir /data/train_final --svg-dir /data/train_final   --out _work/roi_ink --workers 6
+python tools/train_roi_ink.py --shards _work/roi_ink --out weights/roi_ink.pt --epochs 20
 ```
 
 训练标签与评估口径对齐：Thing（0-29）且 `instance-id=-1` 的图元评测时会整条
@@ -314,7 +335,12 @@ python tools/check_compliance.py --results results --out weights/params_report.j
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid（v3 ∪ GAT class8 + YOLO-seg 类别 + PQ 门控，最终）** | **2.597%** | 62.647% | 4.145% | 244 / 4201 / 7085 |
+| **hybrid + class2 专用/256 + 学习式质量门控（当前默认，最终）** | **18.235%** | 68.557% | 26.598% | 1648 / 3415 / 5681 |
+| hybrid + 192/256 路由细化 + 几何门控 | 16.250% | 67.426% | 24.101% | 1591 / 4283 / 5738 |
+| hybrid + 双模型（192）细化 + 质量门控 | 13.995% | 65.891% | 21.239% | 1392 / 4387 / 5937 |
+| hybrid + 单模型 ROI 细化 | 11.804% | 66.240% | 17.820% | 1318 / 6145 / 6011 |
+| hybrid + class8 检测掩码门控（上一版） | 2.893% | 62.177% | 4.653% | 238 / 2664 / 7091 |
+| hybrid（v3 ∪ GAT class8 + YOLO-seg 类别 + PQ 门控，上一版） | 2.597% | 62.647% | 4.145% | 244 / 4201 / 7085 |
 | hybrid（v3 ∪ GAT class8） | 2.190% | 63.856% | 3.430% | 234 / 6083 / 7095 |
 | v3（+ 类抑制 / NMS / 每图 top-12） | 1.884% | 63.482% | 2.968% | 187 / 5084 / 7142 |
 | YOLO-seg + 笔画（segdet） | 1.673% | 58.787% | 2.846% | 175 / 4794 / 7154 |
@@ -322,8 +348,8 @@ python tools/check_compliance.py --results results --out weights/params_report.j
 | v2（骨架折线 + ViT + 颜色先验） | 1.575% | 63.040% | 2.499% | 210 / 9271 / 7119 |
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
-泛化校验：calib 500 hybrid 3.096%（v3 2.320%），holdout 500 hybrid 2.108%
-（v3 1.456%），前 60 张 hybrid 2.527%（v3 1.186%）。完整消融见 `OPTIMIZATION.md` 第 7、11 节，文献与路线见
+泛化校验：calib 500 **18.403%**、holdout 500 **18.069%**（上一版 hybrid 为
+3.094% / 2.109%）。完整消融见 `OPTIMIZATION.md` 第 7、11、14、15 节，文献与路线见
 `RESEARCH_PLAN.md`。
 
 补充诊断（前 60 张子集）：v2 PQ=1.186%（TP/FP/FN=11/556/431），v1 PQ=0；

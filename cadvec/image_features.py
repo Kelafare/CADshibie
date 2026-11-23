@@ -18,13 +18,25 @@ FEATURE_DIM = 256
 _CACHE: dict[str, object] = {}
 
 
+LOCAL_WEIGHTS = Path(__file__).resolve().parents[1] / "weights" / "resnet18_layer3.pt"
+
+
 def _backbone():
     if "model" in _CACHE:
         return _CACHE["model"]
     from torchvision.models import ResNet18_Weights, resnet18
 
-    model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
+    model = resnet18(weights=None)
     trunk = nn.Sequential(*list(model.children())[:7])  # conv1..layer3
+    if LOCAL_WEIGHTS.exists():
+        # 离线交付：主干权重随包提供，不依赖 torchvision 的网络下载/缓存。
+        state = torch.load(LOCAL_WEIGHTS, map_location="cpu", weights_only=True)
+        trunk.load_state_dict(state)
+    else:
+        weights = ResNet18_Weights.IMAGENET1K_V1
+        reference = resnet18(weights=weights)
+        reference_trunk = nn.Sequential(*list(reference.children())[:7])
+        trunk.load_state_dict(reference_trunk.state_dict())
     trunk.eval()
     _CACHE["model"] = trunk
     return trunk

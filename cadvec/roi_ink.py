@@ -1,0 +1,341 @@
+"""ROI 实例墨迹细化（GPU 可选，CPU 可运行）。
+
+YOLO-seg 只提供实例位置（框/掩码），本模块在检测框内用一个小 U-Net 预测
+该实例的精确墨迹，再把墨迹骨架切成短折线输出。相比“把框内整条笔画收进
+实例”，它能保留门/窗符号本体、排除穿框墙线。
+
+训练数据：train_final 的 GT 实例框 + 按评测器一致方式栅格化的实例墨迹。
+"""
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+from skimage.morphology import remove_small_objects, skeletonize
+
+from .skeleton import trace_paths
+
+CROP_SIZE = 192
+PAD = 0.30
+CHUNK = 6
+MIN_LENGTH = 0.2
+
+
+def _conv_block(in_channels: int, out_channels: int) -> nn.Sequential:
+    return nn.Sequential(
+        nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+        nn.BatchNorm2d(out_channels),
+        nn.SiLU(inplace=True),
+        nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+        nn.BatchNorm2d(out_channels),
+        nn.SiLU(inplace=True),
+    )
+
+
+class RoiInkUNet(nn.Module):
+    def __init__(self, classes: int = 36, base: int = 32, class_dim: int = 64):
+        super().__init__()
+        self.class_embed = nn.Sequential(
+            nn.Linear(classes, class_dim), nn.SiLU(),
+            nn.Linear(class_dim, base * 8),
+        )
+        self.enc1 = _conv_block(3, base)
+        self.enc2 = _conv_block(base, base * 2)
+        self.enc3 = _conv_block(base * 2, base * 4)
+        self.enc4 = _conv_block(base * 4, base * 8)
+        self.pool = nn.MaxPool2d(2)
+        self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
+        self.dec3 = _conv_block(base * 8, base * 4)
+        self.up2 = nn.ConvTranspose2d(base * 4, base * 2, 2, stride=2)
+        self.dec2 = _conv_block(base * 4, base * 2)
+        self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
+        self.dec1 = _conv_block(base * 2, base)
+        self.head = nn.Conv2d(base, 1, 1)
+
+    def forward(self, image: torch.Tensor, class_onehot: torch.Tensor) -> torch.Tensor:
+        e1 = self.enc1(image)
+        e2 = self.enc2(self.pool(e1))
+        e3 = self.enc3(self.pool(e2))
+        e4 = self.enc4(self.pool(e3))
+        e4 = e4 + self.class_embed(class_onehot).view(
+            -1, e4.shape[1], 1, 1)
+        d3 = self.dec3(torch.cat([self.up3(e4), e3], dim=1))
+        d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
+        d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+        return self.head(d1)
+
+
+def _resample_four(points: np.ndarray) -> list[list[float]]:
+    if len(points) < 2:
+        return []
+    deltas = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    cumulative = np.concatenate([[0.0], np.cumsum(deltas)])
+    total = float(cumulative[-1])
+    if total <= 1e-9:
+        return []
+    out = []
+    for index in range(4):
+        target = total * index / 3.0
+        position = int(np.searchsorted(cumulative, target, side="right") - 1)
+        position = min(max(position, 0), len(points) - 2)
+        segment = float(deltas[position])
+        ratio = 0.0 if segment <= 1e-9 else (target - cumulative[position]) / segment
+        point = points[position] + (points[position + 1] - points[position]) * ratio
+        out.append([float(point[0]), float(point[1])])
+    return out
+
+
+def vectorize_mask(mask: np.ndarray, left: int, top: int,
+                   crop_width: int, crop_height: int,
+                   scale_x: float, scale_y: float,
+                   threshold: float = 0.5) -> list[tuple[list[list[float]], float]]:
+    """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。"""
+    local = remove_small_objects(mask > threshold, min_size=8, connectivity=2)
+    if local.sum() < 8:
+        return []
+    skeleton = skeletonize(local)
+    if not skeleton.any():
+        return []
+    step_x = crop_width / float(mask.shape[1])
+    step_y = crop_height / float(mask.shape[0])
+    segments = []
+    for path in trace_paths(skeleton, min_pixels=2):
+        points = np.asarray(
+            [((left + (column + 0.5) * step_x) / scale_x,
+              (top + (row + 0.5) * step_y) / scale_y)
+             for row, column in path], dtype=np.float64)
+        for start in range(0, len(points) - 1, CHUNK):
+            piece = points[start:start + CHUNK + 1]
+            if len(piece) < 2:
+                continue
+            length = float(np.linalg.norm(np.diff(piece, axis=0), axis=1).sum())
+            if length < MIN_LENGTH:
+                continue
+            four = _resample_four(piece)
+            if four:
+                segments.append((four, length))
+    return segments
+
+
+class RoiInkRefiner:
+    """加载训练好的 ROI 墨迹模型，把检测框转成精确实例图元。"""
+
+    def __init__(self, model: RoiInkUNet, device: torch.device,
+                 threshold: float = 0.5, max_instances: int = 15,
+                 crop_size: int = CROP_SIZE, quality_model: dict | None = None):
+        self.model = model
+        self.device = device
+        self.threshold = threshold
+        self.max_instances = max_instances
+        self.crop_size = int(crop_size)
+        self.quality_model = quality_model
+        self.onehot = torch.eye(36, device=device)
+
+    @classmethod
+    def load(cls, path: str | Path, device: str | None = "auto",
+             max_instances: int = 15,
+             quality_path: str | Path | None = None) -> "RoiInkRefiner | None":
+        path = Path(path)
+        if not path.exists():
+            return None
+        if device is None or device == "auto":
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        if device == "cuda" and not torch.cuda.is_available():
+            device = "cpu"
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        model = RoiInkUNet(**checkpoint.get("model_kwargs", {}))
+        model.load_state_dict(checkpoint["state_dict"])
+        model = model.to(device).eval()
+        quality_model = None
+        if quality_path is not None and Path(quality_path).exists():
+            try:
+                quality_model = json.loads(
+                    Path(quality_path).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                quality_model = None
+        return cls(model, torch.device(device),
+                   threshold=float(checkpoint.get("threshold", 0.5)),
+                   max_instances=max_instances,
+                   crop_size=int(checkpoint.get("crop_size", CROP_SIZE)),
+                   quality_model=quality_model)
+
+    def _crop(self, box, width: int, height: int):
+        x0, y0, x1, y1 = box
+        side = max(x1 - x0, y1 - y0)
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        half = side * (0.5 + PAD)
+        left = int(round(max(cx - half, 0)))
+        top = int(round(max(cy - half, 0)))
+        right = int(round(min(cx + half, width)))
+        bottom = int(round(min(cy + half, height)))
+        return left, top, max(right, left + 4), max(bottom, top + 4)
+
+    FEATURES = (
+        "conf", "prob_mean", "prob_max", "prob_p90", "mask_fraction",
+        "n_seg", "total_len", "mean_len", "max_len", "w", "h",
+        "aspect", "density", "log_box_area", "ink_box_ratio",
+    )
+
+    def _features(self, class_id: int, confidence: float, det_box, segments,
+                  probability: np.ndarray, scale_x: float, scale_y: float,
+                  canvas_width: int, canvas_height: int) -> dict[str, float]:
+        mask = probability > self.threshold
+        if mask.any():
+            values = probability[mask]
+            prob_mean = float(values.mean())
+            prob_p90 = float(np.percentile(values, 90))
+        else:
+            prob_mean = prob_p90 = 0.0
+        prob_max = float(probability.max()) if probability.size else 0.0
+        mask_fraction = float(mask.mean()) if mask.size else 0.0
+        lengths = [length for _points, length in segments]
+        total = float(sum(lengths))
+        xs = [point[0] for points, _length in segments for point in points]
+        ys = [point[1] for points, _length in segments for point in points]
+        width = max(xs) - min(xs) if xs else 0.0
+        height = max(ys) - min(ys) if ys else 0.0
+        x0, y0, x1, y1 = det_box
+        box_w = max((x1 - x0) / scale_x, 1e-6)
+        box_h = max((y1 - y0) / scale_y, 1e-6)
+        box_area = box_w * box_h
+        return {
+            "conf": float(confidence),
+            "prob_mean": prob_mean,
+            "prob_max": prob_max,
+            "prob_p90": prob_p90,
+            "mask_fraction": mask_fraction,
+            "n_seg": float(len(segments)),
+            "total_len": total,
+            "mean_len": total / max(len(segments), 1),
+            "max_len": max(lengths) if lengths else 0.0,
+            "w": width,
+            "h": height,
+            "aspect": min(width, height) / max(width, height, 1e-6),
+            "density": total / max(width + height, 1e-6),
+            "log_box_area": math.log(max(box_area, 1e-6)),
+            "ink_box_ratio": (width * height) / max(box_area, 1e-6),
+        }
+
+    def _quality_score(self, class_id: int, features: dict[str, float]) -> float | None:
+        if not self.quality_model:
+            return None
+        spec = (self.quality_model.get("classes") or {}).get(str(class_id))
+        if not spec:
+            return None
+        names = self.quality_model.get("features") or self.FEATURES
+        z = float(spec.get("intercept", 0.0))
+        for name, coef, mean, scale in zip(names, spec["coef"], spec["mean"], spec["scale"]):
+            z += float(coef) * (features.get(name, 0.0) - float(mean)) / max(float(scale), 1e-9)
+        return 1.0 / (1.0 + math.exp(-max(min(z, 50.0), -50.0)))
+
+    @torch.no_grad()
+    def analyze(self, image: np.ndarray, boxes: list[tuple[int, float, tuple]],
+                width: int, height: int, canvas_width: int = 100,
+                canvas_height: int = 100) -> list[dict]:
+        """返回每个检测框的细化实例、概率统计与几何特征（不做 NMS/上限）。"""
+        if not boxes:
+            return []
+        crops, meta = [], []
+        for class_id, confidence, det_box in boxes:
+            left, top, right, bottom = self._crop(det_box, width, height)
+            crop = cv2.resize(image[top:bottom, left:right],
+                              (self.crop_size, self.crop_size),
+                              interpolation=cv2.INTER_AREA)
+            crops.append(crop)
+            meta.append((class_id, confidence, det_box, left, top, right, bottom))
+        batch = torch.from_numpy(np.stack(crops)).to(self.device)
+        batch = batch.permute(0, 3, 1, 2).float() / 255.0
+        class_ids = torch.tensor([item[0] for item in meta], device=self.device)
+        with torch.autocast(device_type="cuda" if self.device.type == "cuda" else "cpu",
+                            dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
+            logits = self.model(batch, self.onehot[class_ids])
+        probabilities = torch.sigmoid(logits.float())[:, 0].cpu().numpy()
+        scale_x = width / max(canvas_width, 1)
+        scale_y = height / max(canvas_height, 1)
+        results = []
+        for (class_id, confidence, det_box, left, top, right, bottom), probability in zip(
+                meta, probabilities):
+            resized = cv2.resize(probability, (right - left, bottom - top),
+                                 interpolation=cv2.INTER_LINEAR)
+            segments = vectorize_mask(
+                resized, left, top, right - left, bottom - top,
+                scale_x, scale_y, self.threshold)
+            if not segments:
+                continue
+            results.append({
+                "class_id": class_id,
+                "confidence": confidence,
+                "segments": [
+                    {
+                        "command": 0,
+                        "points": points,
+                        "polyline": np.asarray(points, dtype=np.float64),
+                        "length": float(length),
+                        "rgb": [0, 0, 0],
+                        "layer": 0,
+                        "width": 1.0,
+                    }
+                    for points, length in segments
+                ],
+                "features": self._features(
+                    class_id, confidence, det_box, segments, resized,
+                    scale_x, scale_y, canvas_width, canvas_height),
+                "box": (left, top, right, bottom),
+            })
+        return results
+
+    @torch.no_grad()
+    def refine(self, image: np.ndarray, boxes: list[tuple[int, float, tuple]],
+               width: int, height: int, canvas_width: int = 100,
+               canvas_height: int = 100) -> list[tuple[int, float, list[dict]]]:
+        """boxes: [(class_id, confidence, (x0,y0,x1,y1))]（像素坐标）。
+
+        返回 [(class_id, confidence, segments)]，segments 与 pipeline_segdet
+        的图元字典一致。
+        """
+        analyzed = self.analyze(image, boxes, width, height,
+                                canvas_width, canvas_height)
+
+        def box_iou(first, second):
+            x0 = max(first[0], second[0]); y0 = max(first[1], second[1])
+            x1 = min(first[2], second[2]); y1 = min(first[3], second[3])
+            if x1 <= x0 or y1 <= y0:
+                return 0.0
+            inter = (x1 - x0) * (y1 - y0)
+            area_a = (first[2] - first[0]) * (first[3] - first[1])
+            area_b = (second[2] - second[0]) * (second[3] - second[1])
+            return inter / max(area_a + area_b - inter, 1e-9)
+
+        results = []
+        counts: dict[int, int] = {}
+        kept_boxes: dict[int, list[tuple]] = {}
+        for item in analyzed:
+            class_id = int(item["class_id"])
+            if counts.get(class_id, 0) >= self.max_instances:
+                continue
+            box = item["box"]
+            if any(box_iou(box, other) > 0.5
+                   for other in kept_boxes.get(class_id, [])):
+                continue
+            quality = self._quality_score(class_id, item["features"])
+            if quality is not None:
+                spec = self.quality_model["classes"][str(class_id)]
+                if quality < float(spec.get("threshold", 0.5)):
+                    continue
+            kept_boxes.setdefault(class_id, []).append(box)
+            counts[class_id] = counts.get(class_id, 0) + 1
+            results.append((class_id, float(item["confidence"]), item["segments"]))
+        return results
+
+def dice_loss(logits: torch.Tensor, target: torch.Tensor, eps: float = 1.0) -> torch.Tensor:
+    """训练用 soft Dice 损失（推理不调用）。"""
+    probability = torch.sigmoid(logits)
+    intersection = (probability * target).sum(dim=(1, 2, 3))
+    denominator = probability.sum(dim=(1, 2, 3)) + target.sum(dim=(1, 2, 3))
+    return (1.0 - (2.0 * intersection + eps) / (denominator + eps)).mean()
