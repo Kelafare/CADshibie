@@ -69,9 +69,13 @@ def main() -> int:
     parser.add_argument("--per-class", type=int, default=3)
     parser.add_argument("--crop-sizes", default="192,256")
     parser.add_argument("--chunks", default="4,6,8,12,16")
+    parser.add_argument("--adaptive-eps", default="",
+                        help="逗号分隔的四点误差阈值；非空时额外扫描自适应切分")
     args = parser.parse_args()
 
     chunks = [int(value) for value in args.chunks.split(",") if value.strip()]
+    adaptive_eps = [float(value) for value in args.adaptive_eps.split(",")
+                    if value.strip()]
     crop_sizes = [int(value) for value in args.crop_sizes.split(",") if value.strip()]
     variants = [("native", 0)] + [(f"crop{size}", size) for size in crop_sizes]
     stats = defaultdict(lambda: {"ious": [], "segments": [], "hits": 0, "n": 0,
@@ -116,13 +120,26 @@ def main() -> int:
                     entry["hits"] += int(value > 0.5)
                     entry["n"] += 1
                     entry["per_class"][class_id].append(value)
+                for eps in adaptive_eps:
+                    segments = vectorize_mask(
+                        probability, left, top, right - left, bottom - top,
+                        10.0, 10.0, 0.5, adaptive=True, eps=eps)
+                    value = iou(mask, rasterize(segments))
+                    key = (variant, f"a{eps:g}")
+                    entry = stats[key]
+                    entry["ious"].append(value)
+                    entry["segments"].append(len(segments))
+                    entry["hits"] += int(value > 0.5)
+                    entry["n"] += 1
+                    entry["per_class"][class_id].append(value)
         if index % 20 == 0:
             print(index, flush=True)
 
     payload = {"images": len(paths), "variants": {}}
     print(f"{'variant':>8} {'chunk':>5} {'n':>5} {'meanIoU':>8} "
           f"{'hit>0.5':>8} {'meanSeg':>8}")
-    for (variant, chunk), entry in sorted(stats.items()):
+    for (variant, chunk), entry in sorted(
+            stats.items(), key=lambda item: (str(item[0][0]), str(item[0][1]))):
         values = np.asarray(entry["ious"])
         record = {
             "n": entry["n"],

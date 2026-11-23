@@ -91,11 +91,58 @@ def _resample_four(points: np.ndarray) -> list[list[float]]:
     return out
 
 
+def _point_segment_distance(point, first, second) -> float:
+    vector = second - first
+    norm = float(vector @ vector)
+    if norm <= 1e-12:
+        return float(np.linalg.norm(point - first))
+    ratio = float((point - first) @ vector) / norm
+    ratio = min(max(ratio, 0.0), 1.0)
+    return float(np.linalg.norm(point - (first + ratio * vector)))
+
+
+def _four_point_error(points: np.ndarray, four: list[list[float]]) -> float:
+    corners = np.asarray(four, dtype=np.float64)
+    best = 0.0
+    for point in points:
+        distance = min(_point_segment_distance(point, corners[index],
+                                               corners[index + 1])
+                       for index in range(3))
+        best = max(best, distance)
+    return best
+
+
+def _adaptive_pieces(points: np.ndarray, eps: float,
+                     max_depth: int = 12) -> list[np.ndarray]:
+    """按四点折线与原路径的最大偏差递归切分；直线只保留一段。"""
+    stack = [(points, 0)]
+    pieces = []
+    while stack:
+        piece, depth = stack.pop()
+        if len(piece) <= 4 or depth >= max_depth:
+            pieces.append(piece)
+            continue
+        four = _resample_four(piece)
+        if not four or _four_point_error(piece, four) <= eps:
+            pieces.append(piece)
+            continue
+        errors = np.asarray([min(_point_segment_distance(
+            point, np.asarray(four[index]), np.asarray(four[index + 1]))
+            for index in range(3)) for point in piece])
+        split = int(np.argmax(errors))
+        split = min(max(split, 2), len(piece) - 2)
+        stack.append((piece[split:], depth + 1))
+        stack.append((piece[:split + 1], depth + 1))
+    return pieces
+
+
 def vectorize_mask(mask: np.ndarray, left: int, top: int,
                    crop_width: int, crop_height: int,
                    scale_x: float, scale_y: float,
                    threshold: float = 0.5,
-                   chunk: int = CHUNK) -> list[tuple[list[list[float]], float]]:
+                   chunk: int = CHUNK,
+                   adaptive: bool = False,
+                   eps: float = 0.10) -> list[tuple[list[list[float]], float]]:
     """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。
 
     ``chunk`` 是每条折线最多使用的骨架点数；4 点重采样前保留更长路径可以
@@ -116,8 +163,12 @@ def vectorize_mask(mask: np.ndarray, left: int, top: int,
             [((left + (column + 0.5) * step_x) / scale_x,
               (top + (row + 0.5) * step_y) / scale_y)
              for row, column in path], dtype=np.float64)
-        for start in range(0, len(points) - 1, chunk):
-            piece = points[start:start + chunk + 1]
+        if adaptive:
+            pieces = _adaptive_pieces(points, eps)
+        else:
+            pieces = [points[start:start + chunk + 1]
+                      for start in range(0, len(points) - 1, chunk)]
+        for piece in pieces:
             if len(piece) < 2:
                 continue
             length = float(np.linalg.norm(np.diff(piece, axis=0), axis=1).sum())

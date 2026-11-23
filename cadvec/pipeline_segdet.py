@@ -334,6 +334,10 @@ def run_image_segdet(
                    for confidence, class_id, segments in assigned
                    if class_id not in refiner_classes
                    and not STUFF_CLASS_MIN <= class_id <= STUFF_CLASS_MAX]
+        # Stuff 没有实例身份：同一类别的细化段全部并入该类的 -1 段。
+        stuff_groups.extend((class_id, segments)
+                            for _confidence, class_id, segments in refiner_assigned
+                            if STUFF_CLASS_MIN <= class_id <= STUFF_CLASS_MAX)
     if max_instances > 0 and not refiner_assigned:
         groups = groups[:max_instances]
     elif max_instances > 0 and refiner_assigned:
