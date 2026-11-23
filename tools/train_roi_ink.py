@@ -44,6 +44,8 @@ def main():
     parser.add_argument("--neg-cap", type=int, default=3000)
     parser.add_argument("--init", default=None,
                         help="从已有权重继续训练（fine-tune）")
+    parser.add_argument("--native", action="store_true",
+                        help="训练/保存原分辨率补白模式标记")
     parser.add_argument("--out", default="_work/roi_ink.pt")
     parser.add_argument("--classes", default=",".join(str(i) for i in range(2, 30)))
     parser.add_argument("--cap", type=int, default=1000)
@@ -211,6 +213,7 @@ def main():
             torch.save({"state_dict": model.state_dict(),
                         "model_kwargs": {"classes": 36, "base": 32, "class_dim": 64},
                         "crop_size": int(args.size),
+                        "native_pad": bool(args.native),
                         "dice": dice, "iou": iou, "threshold": threshold,
                         "epoch": epoch + 1}, args.out)
             print("saved", args.out, flush=True)

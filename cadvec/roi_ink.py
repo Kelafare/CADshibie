@@ -94,8 +94,13 @@ def _resample_four(points: np.ndarray) -> list[list[float]]:
 def vectorize_mask(mask: np.ndarray, left: int, top: int,
                    crop_width: int, crop_height: int,
                    scale_x: float, scale_y: float,
-                   threshold: float = 0.5) -> list[tuple[list[list[float]], float]]:
-    """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。"""
+                   threshold: float = 0.5,
+                   chunk: int = CHUNK) -> list[tuple[list[list[float]], float]]:
+    """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。
+
+    ``chunk`` 是每条折线最多使用的骨架点数；4 点重采样前保留更长路径可以
+    减少碎片，但会增大弯曲处的四点误差。默认值保持与旧权重训练时一致。
+    """
     local = remove_small_objects(mask > threshold, min_size=8, connectivity=2)
     if local.sum() < 8:
         return []
@@ -105,13 +110,14 @@ def vectorize_mask(mask: np.ndarray, left: int, top: int,
     step_x = crop_width / float(mask.shape[1])
     step_y = crop_height / float(mask.shape[0])
     segments = []
+    chunk = max(int(chunk), 2)
     for path in trace_paths(skeleton, min_pixels=2):
         points = np.asarray(
             [((left + (column + 0.5) * step_x) / scale_x,
               (top + (row + 0.5) * step_y) / scale_y)
              for row, column in path], dtype=np.float64)
-        for start in range(0, len(points) - 1, CHUNK):
-            piece = points[start:start + CHUNK + 1]
+        for start in range(0, len(points) - 1, chunk):
+            piece = points[start:start + chunk + 1]
             if len(piece) < 2:
                 continue
             length = float(np.linalg.norm(np.diff(piece, axis=0), axis=1).sum())
@@ -128,13 +134,15 @@ class RoiInkRefiner:
 
     def __init__(self, model: RoiInkUNet, device: torch.device,
                  threshold: float = 0.5, max_instances: int = 15,
-                 crop_size: int = CROP_SIZE, quality_model: dict | None = None):
+                 crop_size: int = CROP_SIZE, quality_model: dict | None = None,
+                 native_pad: bool = False):
         self.model = model
         self.device = device
         self.threshold = threshold
         self.max_instances = max_instances
         self.crop_size = int(crop_size)
         self.quality_model = quality_model
+        self.native_pad = bool(native_pad)
         self.onehot = torch.eye(36, device=device)
 
     @classmethod
@@ -165,7 +173,8 @@ class RoiInkRefiner:
                    threshold=float(checkpoint.get("threshold", 0.5)),
                    max_instances=max_instances,
                    crop_size=int(checkpoint.get("crop_size", CROP_SIZE)),
-                   quality_model=quality_model)
+                   quality_model=quality_model,
+                   native_pad=bool(checkpoint.get("native_pad", False)))
 
     def _crop(self, box, width: int, height: int):
         x0, y0, x1, y1 = box
@@ -246,11 +255,34 @@ class RoiInkRefiner:
         crops, meta = [], []
         for class_id, confidence, det_box in boxes:
             left, top, right, bottom = self._crop(det_box, width, height)
-            crop = cv2.resize(image[top:bottom, left:right],
-                              (self.crop_size, self.crop_size),
-                              interpolation=cv2.INTER_AREA)
-            crops.append(crop)
-            meta.append((class_id, confidence, det_box, left, top, right, bottom))
+            crop_width = right - left
+            crop_height = bottom - top
+            if self.native_pad:
+                valid_w, valid_h = crop_width, crop_height
+                if valid_w > self.crop_size or valid_h > self.crop_size:
+                    ratio = min(self.crop_size / valid_w,
+                                self.crop_size / valid_h)
+                    valid_w = max(1, int(round(valid_w * ratio)))
+                    valid_h = max(1, int(round(valid_h * ratio)))
+                    crop = cv2.resize(
+                        image[top:bottom, left:right], (valid_w, valid_h),
+                        interpolation=cv2.INTER_AREA)
+                else:
+                    crop = image[top:bottom, left:right]
+                canvas = np.full((self.crop_size, self.crop_size, 3), 255,
+                                 dtype=np.uint8)
+                canvas[:valid_h, :valid_w] = crop
+                crops.append(canvas)
+                meta.append((class_id, confidence, det_box, left, top,
+                             right, bottom, crop_width, crop_height,
+                             valid_w, valid_h))
+            else:
+                crop = cv2.resize(image[top:bottom, left:right],
+                                  (self.crop_size, self.crop_size),
+                                  interpolation=cv2.INTER_AREA)
+                crops.append(crop)
+                meta.append((class_id, confidence, det_box, left, top,
+                             right, bottom))
         batch = torch.from_numpy(np.stack(crops)).to(self.device)
         batch = batch.permute(0, 3, 1, 2).float() / 255.0
         class_ids = torch.tensor([item[0] for item in meta], device=self.device)
@@ -261,12 +293,22 @@ class RoiInkRefiner:
         scale_x = width / max(canvas_width, 1)
         scale_y = height / max(canvas_height, 1)
         results = []
-        for (class_id, confidence, det_box, left, top, right, bottom), probability in zip(
-                meta, probabilities):
-            resized = cv2.resize(probability, (right - left, bottom - top),
-                                 interpolation=cv2.INTER_LINEAR)
+        for item, probability in zip(meta, probabilities):
+            (class_id, confidence, det_box, left, top, right, bottom) = item[:7]
+            if self.native_pad:
+                crop_width, crop_height, valid_w, valid_h = item[7:11]
+                resized = probability[:valid_h, :valid_w]
+                if (valid_w, valid_h) != (crop_width, crop_height):
+                    resized = cv2.resize(
+                        resized, (crop_width, crop_height),
+                        interpolation=cv2.INTER_LINEAR)
+            else:
+                crop_width = right - left
+                crop_height = bottom - top
+                resized = cv2.resize(probability, (crop_width, crop_height),
+                                     interpolation=cv2.INTER_LINEAR)
             segments = vectorize_mask(
-                resized, left, top, right - left, bottom - top,
+                resized, left, top, crop_width, crop_height,
                 scale_x, scale_y, self.threshold)
             if not segments:
                 continue

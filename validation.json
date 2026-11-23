@@ -58,7 +58,7 @@
       "name": "model_parameter_audit",
       "command": "python infer.py --check-only",
       "status": "passed",
-      "detail": "总参数量 19,198,445（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 五套 ROI 墨迹 U-Net 各 1,948,847），上限 5,000,000,000"
+      "detail": "总参数量 21,147,292（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847），上限 5,000,000,000"
     },
     {
       "name": "vit_training",
@@ -197,6 +197,24 @@
       "command": "python infer.py --input test_final --output pred --engine hybrid && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
       "status": "passed",
       "detail": "统一模型接管 class 26：PQ=18.768%, SQ=68.754%, RQ=27.298%, TP/FP/FN=1687/3344/5642；class 26 TP 32→72、FP 108→44、FN 101→61；calib 19.765%、hold 17.446%、final 18.911%（基线 19.202/16.727/18.508）；1000 张 0 错误"
+    },
+    {
+      "name": "r3_geom_roundtrip",
+      "command": "python tools/geom_roundtrip.py --gt-dir gt_json --limit 100 --per-class 3 --crop-sizes 192,256,384,512 --chunks 6,12",
+      "status": "passed",
+      "detail": "497 个真实 GT 实例严格命中率：192=47.4%、256=74.0%、384=80.3%、512=86.3%、原分辨率=100%；证明几何损失主要来自 ROI 分辨率而非四点重采样"
+    },
+    {
+      "name": "r3_512_roi_training",
+      "command": "python tools/build_roi_ink.py ... --size 512 && python tools/train_roi_ink.py ... --size 512 --epochs 10 --init weights/roi_ink_unified.pt",
+      "status": "passed",
+      "detail": "512×512 统一类别条件模型，15,262 训练样本；A30 bf16 10 轮；验证 Dice 0.696/IoU 0.534；oracle 严格命中 class 3 24→42、class 8 58→70、class 29 3→11"
+    },
+    {
+      "name": "r3_local_test_final_eval",
+      "command": "python infer.py --input test_final --output pred --engine hybrid && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "512 模型接管 class 3/4/26/29 + 质量门控来源键修复：PQ=22.696%, SQ=68.733%, RQ=33.020%, TP/FP/FN=2038/2977/5291；calib 24.099%、hold 21.246%、final 22.660%（基线 19.202/16.727/18.508）；1000 张 0 错误"
     }
   ],
   "model": {
@@ -213,9 +231,11 @@
     "roi_ink_quality": "weights/roi_ink_quality.json，逐类几何质量门限（0 参数）",
     "roi_ink_refiner_256": "weights/roi_ink_256.pt，1,948,847 个张量元素，256×256 ROI 墨迹 U-Net（13 类、1500/类、20 轮，Dice 0.801）；负责 class 8/12/14/15/18/19/20/21/22/25/27/28",
     "roi_ink_refiner_c2": "weights/roi_ink_c2.pt，1,948,847 个张量元素，class 2 专用 192×192 U-Net（30 轮，Dice 0.815）",
-    "roi_ink_refiner_unified": "weights/roi_ink_unified.pt，1,948,847 个张量元素，统一类别条件 256×256 U-Net（30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，Dice 0.760）；默认接管 class 26",
+    "roi_ink_refiner_unified": "weights/roi_ink_unified.pt，1,948,847 个张量元素，统一类别条件 256×256 U-Net（30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，Dice 0.760）",
+    "roi_ink_refiner_512": "weights/roi_ink_512.pt，1,948,847 个张量元素，512×512 统一类别条件 U-Net（从 256 微调 10 轮，Dice 0.696）；默认接管 class 3/4/26/29",
     "roi_quality": "weights/roi_quality.json，旧版学习式逐类质量门控（0 参数）",
-    "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 统一模型 class 26 的学习式质量门控（0 参数）",
+    "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 256 模型 class 26 的质量门控（0 参数）",
+    "roi_quality_512_all": "weights/roi_quality_512_all.json，旧 13 类 + class 3/4/26/29 的默认质量门控（0 参数）",
     "label_qa": "weights/label_qa.json，GT 在 300/400/1000px 栅格下的稳定性统计（0 参数）"
   },
   "synthetic_pq_diagnostic": {

@@ -3,7 +3,7 @@
   "problems": [],
   "models": {
     "ok": true,
-    "total_parameters": 19198445,
+    "total_parameters": 21147292,
     "limit": 5000000000,
     "manifest": "weights/manifest.json",
     "models": [
@@ -150,6 +150,24 @@
         "parameter_source": "manifest",
         "exists": true,
         "size_bytes": 17672
+      },
+      {
+        "name": "roi-ink-512",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink_512.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7826950
+      },
+      {
+        "name": "roi-quality-512-all",
+        "kind": "decision-policy",
+        "path": "roi_quality_512_all.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 22607
       }
     ]
   },

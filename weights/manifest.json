@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "limit": 5000000000,
-  "total_parameters": 19198445,
+  "total_parameters": 21147292,
   "external_network_required": false,
   "external_apis": [],
   "models": [
@@ -147,6 +147,24 @@
       "parameter_source": "manifest",
       "optional": true,
       "description": "学习式 ROI 质量门控（旧 13 类 + 统一模型 class 26；15 维概率/几何特征逐类逻辑回归），0 参数。"
+    },
+    {
+      "name": "roi-ink-512",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_512.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "512×512 统一类别条件 ROI 墨迹 U-Net（30 个 Thing 类；从 256 统一模型微调 10 轮；验证 Dice 0.696/IoU 0.534）。默认负责 class 3/4/26/29；512 等比缩放显著改善细线与小符号的严格 IoU。"
+    },
+    {
+      "name": "roi-quality-512-all",
+      "kind": "decision-policy",
+      "path": "roi_quality_512_all.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "512 模型的质量门控（旧 13 类 + class 3/4/26/29；train_final val 拟合、calib 1000px 选阈值），0 参数。"
     }
   ]
 }

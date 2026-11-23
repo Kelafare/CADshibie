@@ -58,9 +58,13 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
   13 类、1500/类、20 轮（Dice 0.801），负责 class 8/12/14/15/18/19/20/21/22/25/27/28。
 - weights/roi_ink_unified.pt：统一类别条件 256×256 ROI 墨迹 U-Net
   （1,948,847 个张量元素，30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，
-  Dice 0.760），默认接管 class 26。
+  Dice 0.760），作为 512 模型的微调起点/消融保留。
+- weights/roi_ink_512.pt：512×512 统一类别条件 ROI 墨迹 U-Net
+  （1,948,847 个张量元素，从 256 微调 10 轮，Dice 0.696），默认接管
+  class 3/4/26/29；几何往返显示 512 裁剪严格命中率 86.3%（256 为 74.0%）。
 - weights/roi_quality.json：旧版学习式 ROI 实例质量门控（0 参数）。
-- weights/roi_quality_all.json：默认学习式质量门控（旧 13 类 + class 26，0 参数）。
+- weights/roi_quality_all.json：256 模型版本的学习式质量门控（0 参数）。
+- weights/roi_quality_512_all.json：默认质量门控（旧 13 类 + class 3/4/26/29，0 参数）。
 - weights/roi_ink_all.pt：28 类 ROI 墨迹 U-Net（1,948,847 个张量元素），
   作为可选消融权重保留（默认关闭）。
 - weights/roi_ink_quality.json：细化实例几何质量门限（0 参数）。
@@ -73,14 +77,14 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 --------------
 python -m pytest tests -q                  # 56 passed
 python tools/check_compliance.py           # ok: true
-python infer.py --check-only               # 总参数 19,198,445 / 上限 5B
+python infer.py --check-only               # 总参数 21,147,292 / 上限 5B
 
 本地 test_final 全量 1000 张（参考口径 raster 1000、IoU>0.5）：
-hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 统一模型 class 26 + 学习式质量门控 + class8 门控）
-PQ 18.768%，SQ 68.754%，RQ 27.298%，TP/FP/FN = 1687/3344/5642；
-上一版（class2 专用/256）18.235%；更早 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
+hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 512 统一模型接管 3/4/26/29 + 学习式质量门控 + class8 门控）
+PQ 22.696%，SQ 68.733%，RQ 33.020%，TP/FP/FN = 2038/2977/5291；
+上一版（256 统一模型 class 26）18.768%；更早 18.235% / 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
 v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；v2 起点 1.575%；v1 0。
-泛化校验（dHash 分组）：calib 300 19.765%、hold 300 17.446%、final 400 18.911%；
+泛化校验（dHash 分组）：calib 300 24.099%、hold 300 21.246%、final 400 22.660%；
 基线同划分为 19.202% / 16.727% / 18.508%。
 该结果仅用于本地链路诊断，不是官方 dev_final 成绩（官方真值不公开）。
 

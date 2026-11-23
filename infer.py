@@ -177,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="hybrid 引擎中由 GAT 接管的类别（逗号分隔）",
     )
     parser.add_argument(
-        "--segdet-classes", default="26,29,15,23,16,10,12",
+        "--segdet-classes", default="26,29,15,23,16,10,12,3,4",
         help="hybrid 引擎中由 YOLO-seg 接管的类别",
     )
     parser.add_argument(
@@ -217,15 +217,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="ROI 实例几何质量门限（JSON）；不存在则不过滤",
     )
     parser.add_argument(
-        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_all.json"),
+        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_512_all.json"),
         help="学习式 ROI 实例质量模型（JSON）；不存在则关闭",
     )
     parser.add_argument(
-        "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_unified.pt"),
-        help="第二套 ROI 墨迹权重（统一类别条件模型，用于 --roi-ink-aux-classes）",
+        "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_512.pt"),
+        help="第二套 ROI 墨迹权重（512 统一类别条件模型，用于 --roi-ink-aux-classes）",
     )
     parser.add_argument(
-        "--roi-ink-aux-classes", default="26",
+        "--roi-ink-aux-classes", default="3,4,26,29",
         help="第二套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(

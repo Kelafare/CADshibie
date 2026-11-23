@@ -25,12 +25,14 @@ from PIL import Image, ImageDraw  # noqa: E402
 SIZE = 192
 PAD = 0.30
 CLASSES = tuple(range(2, 30))
+NATIVE = False
 
 
-def _init_worker(size: int, classes) -> None:
-    global SIZE, CLASSES
+def _init_worker(size: int, classes, native: bool = False) -> None:
+    global SIZE, CLASSES, NATIVE
     SIZE = int(size)
     CLASSES = tuple(classes)
+    NATIVE = bool(native)
 
 
 def render_instances(primitives, raster=1000):
@@ -75,6 +77,22 @@ def crop_instance(image, mask, box):
     target = mask[top:bottom, left:right]
     # gt_segment_masks 返回 0/1；先放大到 0/255，再缩放，避免细线被 AREA 取整成 0。
     target = (target.astype(np.uint8) * 255)
+    if NATIVE:
+        crop_h, crop_w = crop.shape[:2]
+        if crop_w > SIZE or crop_h > SIZE:
+            scale = min(SIZE / crop_w, SIZE / crop_h)
+            resized_w = max(1, int(round(crop_w * scale)))
+            resized_h = max(1, int(round(crop_h * scale)))
+            crop = cv2.resize(crop, (resized_w, resized_h),
+                              interpolation=cv2.INTER_AREA)
+            target = cv2.resize(target, (resized_w, resized_h),
+                                interpolation=cv2.INTER_AREA)
+            crop_h, crop_w = resized_h, resized_w
+        canvas = np.full((SIZE, SIZE, 3), 255, dtype=np.uint8)
+        canvas[:crop_h, :crop_w] = crop
+        target_canvas = np.zeros((SIZE, SIZE), dtype=np.uint8)
+        target_canvas[:crop_h, :crop_w] = target
+        return canvas, target_canvas
     crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     target = cv2.resize(target, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     return crop, target
@@ -93,6 +111,9 @@ def sample_background(image, rng, attempts=24):
         crop = image[top:top + side, left:left + side]
         if float((crop.min(axis=2) < 245).mean()) > 0.01:
             continue
+        if NATIVE:
+            crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
+            return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
         crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
         return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
     return None
@@ -151,7 +172,11 @@ def main():
                         help="只处理 train_final 中该角色的图片")
     parser.add_argument("--negatives", type=int, default=0,
                         help="每张训练图附加的空白负样本数（val 不加）")
+    parser.add_argument("--native", action="store_true",
+                        help="原分辨率模式：裁剪不缩放，左上角补白到 SIZE；"
+                             "超出 SIZE 的裁剪才等比缩小")
     args = parser.parse_args()
+    globals()["NATIVE"] = bool(args.native)
     if args.classes.strip():
         globals()["CLASSES"] = tuple(
             int(v) for v in args.classes.split(",") if v.strip())
@@ -193,7 +218,7 @@ def main():
 
     started = time.perf_counter()
     with Pool(args.workers, initializer=_init_worker,
-              initargs=(args.size, CLASSES)) as pool:
+              initargs=(args.size, CLASSES, args.native)) as pool:
         for index, (_stem, items) in enumerate(pool.imap_unordered(process, jobs, chunksize=8)):
             for semantic, crop, target in items:
                 buckets[semantic]["images"].append(crop)
