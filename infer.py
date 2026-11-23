@@ -221,6 +221,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="学习式 ROI 实例质量模型（JSON）；不存在则关闭",
     )
     parser.add_argument(
+        "--stuff-weights", default=str(SCRIPT_DIR / "weights" / "stuff_unet.pt"),
+        help="全图 Stuff 语义分支权重；不存在则关闭",
+    )
+    parser.add_argument(
+        "--stuff-thresholds", default=str(SCRIPT_DIR / "weights" / "stuff_thresholds.json"),
+        help="Stuff 逐类阈值 JSON（class -> threshold）",
+    )
+    parser.add_argument(
+        "--stuff-device", default="auto", choices=("auto", "cuda", "cpu"),
+    )
+    parser.add_argument(
         "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_512.pt"),
         help="第二套 ROI 墨迹权重（512 统一类别条件模型，用于 --roi-ink-aux-classes）",
     )
@@ -369,6 +380,7 @@ def _process_one(
     refiner_classes: frozenset = frozenset(),
     quality_rules=None,
     refiners=(),
+    stuff_branch=None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -471,6 +483,11 @@ def _process_one(
             suppress=hybrid["suppress"],
             quality_rules=quality_rules,
         )
+        if stuff_branch is not None:
+            from cadvec.stuff_branch import append_stuff
+            stuff_items = stuff_branch.infer(path)
+            if stuff_items:
+                data = append_stuff(data, stuff_items, width, height)
         write_output(data, output_dir / f"{path.stem}.json")
         return {
             "file": path.name,
@@ -799,6 +816,15 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in (payload.get("rules") or {}).items():
             if isinstance(value, (list, tuple)) and len(value) == 3:
                 quality_rules[int(key)] = (str(value[0]), str(value[1]), float(value[2]))
+    stuff_branch = None
+    if args.engine == "hybrid" and Path(args.stuff_weights).exists():
+        from cadvec.stuff_branch import StuffBranch
+        stuff_branch = StuffBranch.load(
+            args.stuff_weights, args.stuff_thresholds, args.stuff_device)
+        if stuff_branch is not None:
+            print(f"Stuff 语义分支：设备 {stuff_branch.device}，"
+                  f"阈值 {stuff_branch.thresholds or 'default 0.5'}",
+                  file=sys.stderr)
     refiner = load_refiner(ExternalApiConfig(
         enabled=args.external_api,
         base_url=args.external_url,
@@ -840,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
                 refiner_classes=roi_classes,
                 quality_rules=quality_rules,
                 refiners=tuple(roi_plan),
+                stuff_branch=stuff_branch,
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:

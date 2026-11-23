@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "limit": 5000000000,
-  "total_parameters": 21147292,
+  "total_parameters": 23077263,
   "external_network_required": false,
   "external_apis": [],
   "models": [
@@ -165,6 +165,24 @@
       "parameter_source": "manifest",
       "optional": true,
       "description": "512 模型的质量门控（旧 13 类 + class 3/4/26/29；train_final val 拟合、calib 1000px 选阈值），0 参数。"
+    },
+    {
+      "name": "stuff-unet",
+      "kind": "cnn-semantic-segmenter",
+      "path": "stuff_unet.pt",
+      "parameters": 1929971,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "全图 Stuff 语义 U-Net（512 重叠分块，30–34 五类；train_final 1598 张含 Stuff 图纸、12,582 训练块、40 轮，best val mIoU 0.333）。每类按 instance=-1 输出，不依赖 YOLO/Thing ROI。"
+    },
+    {
+      "name": "stuff-thresholds",
+      "kind": "decision-policy",
+      "path": "stuff_thresholds.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "Stuff 每类概率阈值与最小面积（calib 300 全图统计 TP/FP/FN 后按边际 PQ 选择），0 参数。"
     }
   ]
 }

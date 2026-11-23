@@ -10,13 +10,14 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 22.696%**，SQ 68.733%，
-  RQ 33.020%，TP/FP/FN = 2038/2977/5291（hybrid + class 8 门控 +
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 23.313%**，SQ 68.766%，
+  RQ 33.902%，TP/FP/FN = 2158/3244/5171（hybrid + class 8 门控 +
   class2 专用/256 ROI 细化 + 512 统一类别条件 ROI 模型接管 3/4/26/29 +
-  学习式与几何双重质量门控）。
+  全图 Stuff 语义分支接管 30/31/32/33/34 + 学习式与几何双重质量门控）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
   （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
-  + class 8 检测掩码门控 + ROI 实例墨迹细化 + 512 统一类别条件模型）。
+  + class 8 检测掩码门控 + ROI 实例墨迹细化 + 512 统一类别条件模型
+  + 全图 Stuff 语义分支）。
 - 方法、消融和文献路线见 `METHOD.md`、`OPTIMIZATION.md`、`RESEARCH_PLAN.md`。
 - 依赖：`pip install -r requirements.txt`（GPU 可选，自动回退 CPU）。
 - 离线合规：`python tools/check_compliance.py`。
@@ -179,6 +180,9 @@ python infer.py --input /data/dev_final --output /results \
 | `--roi-ink-weights-aux PATH` | 512 统一类别条件 ROI 权重，默认 `weights/roi_ink_512.pt` |
 | `--roi-ink-aux-classes 3,4,26,29` | 512 统一类别模型默认负责的类别（可扩到 `0..29`） |
 | `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_512_all.json` |
+| `--stuff-weights PATH` | 全图 Stuff 语义分支权重，默认 `weights/stuff_unet.pt`；缺失则关闭 |
+| `--stuff-thresholds PATH` | Stuff 逐类概率阈值/最小面积，默认 `weights/stuff_thresholds.json` |
+| `--stuff-device auto/cuda/cpu` | Stuff 分支设备，默认自动 CUDA |
 
 ## 4. 方法（3 页内说明）
 
@@ -219,7 +223,7 @@ v2 引擎（默认）分五步，详细说明见 `METHOD.md`：
 | 规则要求 | 本提交的做法 |
 |---|---|
 | 64 位 Linux、离线运行 | `Dockerfile` 基于 `python:3.13-slim`；`infer.py` 启动即安装 socket 防护；`manifest` 声明 `external_network_required=false`；无外部 API |
-| 模型参数总量 ≤ 5B | 审计总量 21,147,292（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
+| 模型参数总量 ≤ 5B | 审计总量 23,077,263（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 + Stuff U-Net 1,929,971）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
 | 容器、启动命令、依赖版本、模型清单 | `Dockerfile`、`run.sh`、`requirements.txt`、`weights/manifest.json`、`environment.json` |
 | 验证 JSON | `validation.json` 记录输出契约、测试/自检结果；`infer.py` 输出逐图 JSON 并由 `validate_output` 校验 |
 | 仅使用主办方数据 | 只使用 `train_final`/`test_final` 的 SVG 构建先验与可选分类器，`dev_final` 只读 PNG；未使用任何外部数据 |
@@ -313,7 +317,9 @@ python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 10
 - `roi_ink_c2.pt` / `roi_ink_256.pt`：ROI 实例墨迹 U-Net（各 1.95M 参数）；
   默认 class 2 专用模型负责 class 2，256 模型负责 8/12/14/15/18/19/20/21/22/25/27/28；
 - `roi_ink_512.pt`：512 统一类别条件 ROI 墨迹 U-Net（30 个 Thing 类，1.95M 参数），
-  默认接管 class 3/4/26/29；全量 1000 张相对 18.768% 提升到 22.696%；
+  默认接管 class 3/4/26/29；
+- `stuff_unet.pt`：全图 Stuff 语义 U-Net（30–34，1.93M 参数），512 分块推理；
+  全量 1000 张相对 22.696% 提升到 **23.313%**；
 - `roi_ink_unified.pt`：256 统一类别模型（保留用于消融与 512 微调起点）；
 - `roi_quality_512_all.json`：默认学习式质量门控（旧 13 类 + class 3/4/26/29）；
 - `roi_quality_all.json`：256 模型版本的质量门控（保留用于消融）；
@@ -366,7 +372,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid + 512 统一模型接管 3/4/26/29（当前默认，最终）** | **22.696%** | 68.733% | 33.020% | 2038 / 2977 / 5291 |
+| **hybrid + 512 统一模型 + 全图 Stuff 分支（当前默认，最终）** | **23.313%** | 68.766% | 33.902% | 2158 / 3244 / 5171 |
+| hybrid + 512 统一模型接管 3/4/26/29 | 22.696% | 68.733% | 33.020% | 2038 / 2977 / 5291 |
 | hybrid + 统一类别 ROI 接管 class 26（上一版） | 18.768% | 68.754% | 27.298% | 1687 / 3344 / 5642 |
 | hybrid + class2 专用/256 + 学习式质量门控 | 18.235% | 68.557% | 26.598% | 1648 / 3415 / 5681 |
 | hybrid + 192/256 路由细化 + 几何门控 | 16.250% | 67.426% | 24.101% | 1591 / 4283 / 5738 |
@@ -382,8 +389,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
 泛化校验（R1 感知哈希分组划分，test_final 300/300/400）：calib
-**24.099%**（基线 19.202%）、hold **21.246%**（基线 16.727%）、从未参与任何选择
-的 final **22.660%**（基线 18.508%），三个子集同向。上一版按旧 500/500
+**24.707%**（基线 19.202%）、hold **22.130%**（基线 16.727%）、从未参与任何选择
+的 final **23.105%**（基线 18.508%），三个子集同向。上一版按旧 500/500
 随机划分的 18.403% / 18.069% 仅作参考。完整消融见 `OPTIMIZATION.md`
 第 7、11、14、15、16、17 节，文献与路线见 `RESEARCH_PLAN.md`。
 

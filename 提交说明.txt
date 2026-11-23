@@ -65,6 +65,10 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 - weights/roi_quality.json：旧版学习式 ROI 实例质量门控（0 参数）。
 - weights/roi_quality_all.json：256 模型版本的学习式质量门控（0 参数）。
 - weights/roi_quality_512_all.json：默认质量门控（旧 13 类 + class 3/4/26/29，0 参数）。
+- weights/stuff_unet.pt：全图 Stuff 语义 U-Net（1,929,971 个张量元素），
+  30–34 五类、512 重叠分块；train_final 1,598 张含 Stuff 图纸训练，
+  best val mIoU 0.333。
+- weights/stuff_thresholds.json：Stuff 逐类概率阈值与最小面积（0 参数）。
 - weights/roi_ink_all.pt：28 类 ROI 墨迹 U-Net（1,948,847 个张量元素），
   作为可选消融权重保留（默认关闭）。
 - weights/roi_ink_quality.json：细化实例几何质量门限（0 参数）。
@@ -77,14 +81,14 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 --------------
 python -m pytest tests -q                  # 56 passed
 python tools/check_compliance.py           # ok: true
-python infer.py --check-only               # 总参数 21,147,292 / 上限 5B
+python infer.py --check-only               # 总参数 23,077,263 / 上限 5B
 
 本地 test_final 全量 1000 张（参考口径 raster 1000、IoU>0.5）：
-hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 512 统一模型接管 3/4/26/29 + 学习式质量门控 + class8 门控）
-PQ 22.696%，SQ 68.733%，RQ 33.020%，TP/FP/FN = 2038/2977/5291；
-上一版（256 统一模型 class 26）18.768%；更早 18.235% / 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
+hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 512 统一模型接管 3/4/26/29 + 全图 Stuff 分支 30–34 + 学习式质量门控 + class8 门控）
+PQ 23.313%，SQ 68.766%，RQ 33.902%，TP/FP/FN = 2158/3244/5171；
+上一版（512 模型）22.696%；更早 18.768% / 18.235% / 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
 v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；v2 起点 1.575%；v1 0。
-泛化校验（dHash 分组）：calib 300 24.099%、hold 300 21.246%、final 400 22.660%；
+泛化校验（dHash 分组）：calib 300 24.707%、hold 300 22.130%、final 400 23.105%；
 基线同划分为 19.202% / 16.727% / 18.508%。
 该结果仅用于本地链路诊断，不是官方 dev_final 成绩（官方真值不公开）。
 

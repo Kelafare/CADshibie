@@ -118,16 +118,21 @@ YOLO-seg 的掩码是 GT 实例凸包，框内混入墙线和文字，直接把�
   门控的分组键（此前主引擎与 ROI 同号实例被错误合并，class 8 因此被误删）。
   全量相对上一版：class 3 +227 TP、class 4 +63 TP 且 FP −434、class 29
   FP −307、class 8 TP +46；
-- 最终全量：PQ **22.696%**（SQ 68.733、RQ 33.020，TP/FP/FN=2038/2977/5291），
-  R1 分组 calib 24.099%、hold 21.246%、final 22.660%，推理约 0.85s/张
-  （含全部引擎）。
+- **全图 Stuff 语义分支**（`stuff_unet.pt`）：30–34 五类、512 重叠分块、
+  train_final 1,598 张含 Stuff 图纸训练；推理拼接回 1000px，每类按
+  `instance=-1` 输出一条结构段。逐类阈值/最小面积在 calib 用全图
+  TP/FP/FN 标定，hold/final 验证。全量 Stuff TP +120，Thing 不变；
+- 最终全量：PQ **23.313%**（SQ 68.766、RQ 33.902，TP/FP/FN=2158/3244/5171），
+  R1 分组 calib 24.707%、hold 22.130%、final 23.105%，推理约 1.5s/张
+  （含全部引擎与 Stuff 分支）。
 
 ## 3. 合规、资源与可复现性
 
 - **离线**：`infer.py` 启动即安装 socket 防护，评测不访问外部网络。
 - **模型规模**：ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 +
-  ResNet18 特征主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 =
-  21,147,292，远低于 5B；`compliance/params.py` 读取 `.pt` 状态字典求和并核对清单。
+  ResNet18 特征主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 +
+  Stuff U-Net 1,929,971 = 23,077,263，远低于 5B；
+  `compliance/params.py` 读取 `.pt` 状态字典求和并核对清单。
 - **数据边界**：只使用主办方 `train_final`/`test_final` 的 SVG 训练与本地
   评估，`dev_final` 推理只读 PNG。
 - **可复现**：依赖固定、种子固定；ViT 推理是确定性的前向计算，输出与线程

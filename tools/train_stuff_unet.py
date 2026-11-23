@@ -11,6 +11,7 @@ import time
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
@@ -37,6 +38,8 @@ def main() -> int:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val-images", type=int, default=20)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--gpus", default="all",
+                        help="all 或逗号分隔的 GPU 编号，例如 0,1")
     args = parser.parse_args()
     random = np.random.RandomState(args.seed)
     torch.manual_seed(args.seed)
@@ -55,7 +58,21 @@ def main() -> int:
           "images", len(unique) - len(val_stems), "/", len(val_stems),
           flush=True)
 
+    if torch.cuda.is_available():
+        available = torch.cuda.device_count()
+        if args.gpus.strip().lower() == "all":
+            device_ids = list(range(available))
+        else:
+            device_ids = [int(value) for value in args.gpus.split(",")
+                          if value.strip()]
+            device_ids = [value for value in device_ids if value < available]
+        device = torch.device(f"cuda:{device_ids[0]}")
+    else:
+        device_ids = []
     model = StuffUNet(classes=5, base=32).to(device)
+    if len(device_ids) > 1:
+        model = nn.DataParallel(model, device_ids=device_ids)
+        print("DataParallel GPUs", device_ids, flush=True)
     print("params", sum(p.numel() for p in model.parameters()), flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=0.01)
@@ -112,7 +129,10 @@ def main() -> int:
               + f" ({elapsed:.0f}s)", flush=True)
         if mean_iou > best:
             best = mean_iou
-            torch.save({"state_dict": model.state_dict(),
+            state = (model.module.state_dict()
+                     if isinstance(model, nn.DataParallel)
+                     else model.state_dict())
+            torch.save({"state_dict": state,
                         "model_kwargs": {"classes": 5, "base": 32},
                         "classes": list(range(30, 35)),
                         "miou": mean_iou}, args.out)
