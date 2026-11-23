@@ -3,9 +3,9 @@
   "problems": [],
   "models": {
     "ok": true,
-    "total_parameters": 17249598,
+    "total_parameters": 19198445,
     "limit": 5000000000,
-    "manifest": "weights\\manifest.json",
+    "manifest": "weights/manifest.json",
     "models": [
       {
         "name": "stroke-vit",
@@ -132,7 +132,26 @@
         "parameter_source": "torch-state-dict",
         "exists": true,
         "size_bytes": 7826786
+      },
+      {
+        "name": "roi-ink-unified",
+        "kind": "cnn-ink-segmenter",
+        "path": "roi_ink_unified.pt",
+        "parameters": 1948847,
+        "parameter_source": "torch-state-dict",
+        "exists": true,
+        "size_bytes": 7827286
+      },
+      {
+        "name": "roi-quality-all",
+        "kind": "decision-policy",
+        "path": "roi_quality_all.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 17672
       }
     ]
-  }
+  },
+  "result_files": 1000
 }

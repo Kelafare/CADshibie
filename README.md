@@ -10,12 +10,13 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 18.235%**，SQ 68.557%，
-  RQ 26.598%，TP/FP/FN = 1648/3415/5681（hybrid + class 8 门控 +
-  class2 专用/256 ROI 细化 + 学习式与几何双重质量门控）。
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 18.768%**，SQ 68.754%，
+  RQ 27.298%，TP/FP/FN = 1687/3344/5642（hybrid + class 8 门控 +
+  class2 专用/256 ROI 细化 + 统一类别条件 ROI 模型接管 class 26 +
+  学习式与几何双重质量门控）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
   （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
-  + class 8 检测掩码门控 + ROI 实例墨迹细化）。
+  + class 8 检测掩码门控 + ROI 实例墨迹细化 + 统一类别条件模型）。
 - 方法、消融和文献路线见 `METHOD.md`、`OPTIMIZATION.md`、`RESEARCH_PLAN.md`。
 - 依赖：`pip install -r requirements.txt`（GPU 可选，自动回退 CPU）。
 - 离线合规：`python tools/check_compliance.py`。
@@ -170,13 +171,14 @@ python infer.py --input /data/dev_final --output /results \
 | `--hybrid-gate-classes 8` | 实例级门控类别：class 8 实例必须被 YOLO-seg 同类检测掩码覆盖，否则丢弃；空串关闭 |
 | `--hybrid-gate-threshold 0.1` | 门控最小重叠比例 |
 | `--hybrid-gate-metric cover/iou` | 重叠度量：`cover`=交集/较小面积（默认），`iou`=标准 IoU |
-| `--roi-ink-weights PATH` | ROI 实例墨迹细化权重，默认 `weights/roi_ink.pt`；缺失则关闭 |
+| `--roi-ink-weights PATH` | ROI 实例墨迹细化权重，默认 `weights/roi_ink_c2.pt`；缺失则关闭 |
 | `--roi-ink-classes 2` | 主 ROI 权重（class 2 专用 192 模型）负责的类别 |
 | `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,22,25,27,28` | 256 ROI 权重负责的类别 |
 | `--roi-ink-device auto/cuda/cpu` | 细化器设备，默认自动 CUDA |
 | `--roi-ink-quality PATH` | 细化实例几何质量门限 JSON，默认 `weights/roi_ink_quality.json`；缺失则不过滤 |
-| `--roi-ink-weights-aux PATH` | 可选第二套 ROI 权重（默认关闭；28 类 192 模型用于消融） |
-| `--roi-ink-aux-classes` | 第二套权重负责的类别，默认空 |
+| `--roi-ink-weights-aux PATH` | 统一类别条件 ROI 权重，默认 `weights/roi_ink_unified.pt` |
+| `--roi-ink-aux-classes 26` | 统一类别模型默认负责的类别（可扩到 `0..29`） |
+| `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_all.json` |
 
 ## 4. 方法（3 页内说明）
 
@@ -217,7 +219,7 @@ v2 引擎（默认）分五步，详细说明见 `METHOD.md`：
 | 规则要求 | 本提交的做法 |
 |---|---|
 | 64 位 Linux、离线运行 | `Dockerfile` 基于 `python:3.13-slim`；`infer.py` 启动即安装 socket 防护；`manifest` 声明 `external_network_required=false`；无外部 API |
-| 模型参数总量 ≤ 5B | 审计总量 17,249,598（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 四套 ROI 墨迹 U-Net 各 1,948,847）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
+| 模型参数总量 ≤ 5B | 审计总量 19,198,445（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 五套 ROI 墨迹 U-Net 各 1,948,847）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
 | 容器、启动命令、依赖版本、模型清单 | `Dockerfile`、`run.sh`、`requirements.txt`、`weights/manifest.json`、`environment.json` |
 | 验证 JSON | `validation.json` 记录输出契约、测试/自检结果；`infer.py` 输出逐图 JSON 并由 `validate_output` 校验 |
 | 仅使用主办方数据 | 只使用 `train_final`/`test_final` 的 SVG 构建先验与可选分类器，`dev_final` 只读 PNG；未使用任何外部数据 |
@@ -310,8 +312,11 @@ python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 10
 - `yolo_seg.pt` / `gat_primitive.pt` / `resnet18_layer3.pt`：hybrid 的实例分割、图元 GAT 与图像特征主干；
 - `roi_ink_c2.pt` / `roi_ink_256.pt`：ROI 实例墨迹 U-Net（各 1.95M 参数）；
   默认 class 2 专用模型负责 class 2，256 模型负责 8/12/14/15/18/19/20/21/22/25/27/28；
-  `roi_ink.pt` / `roi_ink_all.pt` 保留用于消融；
-- `roi_quality.json`：学习式 ROI 实例质量门控（逐类逻辑回归，15 维概率/几何特征）；
+- `roi_ink_unified.pt`：统一类别条件 256 ROI 墨迹 U-Net（30 个 Thing 类，1.95M 参数），
+  默认接管 class 26（全量 1000 张 +0.533 PQ）；
+- `roi_quality_all.json`：学习式 ROI 实例质量门控（旧 13 类 + class 26）；
+- `label_qa.json`：GT 在 300/400/1000px 栅格下的稳定性诊断；
+- `roi_ink.pt` / `roi_ink_all.pt` / `roi_quality.json` 保留用于消融；
 - `color_prior.json`：v1 颜色查找表（0 参数，保留兼容）。
 
 训练/重建命令：
@@ -326,6 +331,21 @@ python tools/check_compliance.py --results results --out weights/params_report.j
 # ROI 实例墨迹细化（GPU）
 python tools/build_roi_ink.py --png-dir /data/train_final --svg-dir /data/train_final   --out _work/roi_ink --workers 6
 python tools/train_roi_ink.py --shards _work/roi_ink --out weights/roi_ink.pt --epochs 20
+
+# R1 数据卫生：按感知哈希分组划分 / 标签栅格稳定性 / 难负例
+python tools/build_splits.py --train-dir /data/train_final --test-dir /data/test_final \
+  --out weights/splits.json
+python tools/label_qa.py --gt-dir gt_json --out weights/label_qa.json
+python tools/mine_negatives.py --png-dir /data/train_final --svg-dir /data/train_final \
+  --out _work/roi_negatives --split-file weights/splits.json --split-role train
+
+# R2 统一类别条件 ROI 模型（30 个 Thing 类，256；含空白/难负例）
+python tools/build_roi_ink.py --png-dir /data/train_final --svg-dir /data/train_final \
+  --out _work/roi_unified/train --size 256 --classes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 \
+  --split-file weights/splits.json --split-role train --negatives 1 --workers 32
+python tools/train_roi_ink.py --shards _work/roi_unified/train \
+  --val-shards _work/roi_unified/val --classes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 \
+  --cap 1500 --size 256 --epochs 24 --out weights/roi_ink_unified.pt
 ```
 
 训练标签与评估口径对齐：Thing（0-29）且 `instance-id=-1` 的图元评测时会整条
@@ -335,7 +355,8 @@ python tools/train_roi_ink.py --shards _work/roi_ink --out weights/roi_ink.pt --
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid + class2 专用/256 + 学习式质量门控（当前默认，最终）** | **18.235%** | 68.557% | 26.598% | 1648 / 3415 / 5681 |
+| **hybrid + 统一类别 ROI 接管 class 26（当前默认，最终）** | **18.768%** | 68.754% | 27.298% | 1687 / 3344 / 5642 |
+| hybrid + class2 专用/256 + 学习式质量门控（上一版） | 18.235% | 68.557% | 26.598% | 1648 / 3415 / 5681 |
 | hybrid + 192/256 路由细化 + 几何门控 | 16.250% | 67.426% | 24.101% | 1591 / 4283 / 5738 |
 | hybrid + 双模型（192）细化 + 质量门控 | 13.995% | 65.891% | 21.239% | 1392 / 4387 / 5937 |
 | hybrid + 单模型 ROI 细化 | 11.804% | 66.240% | 17.820% | 1318 / 6145 / 6011 |
@@ -348,9 +369,11 @@ python tools/train_roi_ink.py --shards _work/roi_ink --out weights/roi_ink.pt --
 | v2（骨架折线 + ViT + 颜色先验） | 1.575% | 63.040% | 2.499% | 210 / 9271 / 7119 |
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
-泛化校验：calib 500 **18.403%**、holdout 500 **18.069%**（上一版 hybrid 为
-3.094% / 2.109%）。完整消融见 `OPTIMIZATION.md` 第 7、11、14、15 节，文献与路线见
-`RESEARCH_PLAN.md`。
+泛化校验（R1 感知哈希分组划分，test_final 300/300/400）：calib
+19.765%（基线 19.202%）、hold **17.446%**（基线 16.727%）、从未参与任何选择
+的 final **18.911%**（基线 18.508%），三个子集同向。上一版按旧 500/500
+随机划分的 18.403% / 18.069% 仅作参考。完整消融见 `OPTIMIZATION.md`
+第 7、11、14、15、16 节，文献与路线见 `RESEARCH_PLAN.md`。
 
 补充诊断（前 60 张子集）：v2 PQ=1.186%（TP/FP/FN=11/556/431），v1 PQ=0；
 把 ViT 类别替换为真值的上界为 PQ=3.164%。该子集比全量更难，小样本波动大，

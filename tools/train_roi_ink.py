@@ -35,6 +35,15 @@ def load_class(shard_dir: str, class_id: int, cap: int):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--shards", default="_work/roi_ink")
+    parser.add_argument("--val-shards", default=None,
+                        help="独立验证集 shard 目录；为空则按 90/10 随机切分")
+    parser.add_argument("--val-cap", type=int, default=400,
+                        help="每类验证样本上限")
+    parser.add_argument("--neg-shards", default=None,
+                        help="tools/mine_negatives.py 输出的负样本目录")
+    parser.add_argument("--neg-cap", type=int, default=3000)
+    parser.add_argument("--init", default=None,
+                        help="从已有权重继续训练（fine-tune）")
     parser.add_argument("--out", default="_work/roi_ink.pt")
     parser.add_argument("--classes", default=",".join(str(i) for i in range(2, 30)))
     parser.add_argument("--cap", type=int, default=1000)
@@ -69,12 +78,53 @@ def main():
     order = np.arange(len(images))
     np.random.shuffle(order)
     images, masks, labels = images[order], masks[order], labels[order]
-    split = int(len(images) * 0.9)
-    train_x, train_m, train_c = images[:split], masks[:split], labels[:split]
-    val_x, val_m, val_c = images[split:], masks[split:], labels[split:]
+    if args.val_shards:
+        val_images, val_masks, val_labels = [], [], []
+        for class_id in [int(v) for v in args.classes.split(",")]:
+            x, y = load_class(args.val_shards, class_id, args.val_cap)
+            if x is None:
+                continue
+            val_images.append(x)
+            val_masks.append(y)
+            val_labels.append(np.full(len(x), class_id, dtype=np.int64))
+        if val_images:
+            val_x = np.concatenate(val_images)
+            val_m = np.concatenate(val_masks).astype(np.float32) / 255.0
+            val_c = np.concatenate(val_labels)
+            train_x, train_m, train_c = images, masks, labels
+        else:
+            print("val shards 为空，回退到 90/10 切分", flush=True)
+            split = int(len(images) * 0.9)
+            train_x, train_m, train_c = images[:split], masks[:split], labels[:split]
+            val_x, val_m, val_c = images[split:], masks[split:], labels[split:]
+    else:
+        split = int(len(images) * 0.9)
+        train_x, train_m, train_c = images[:split], masks[:split], labels[:split]
+        val_x, val_m, val_c = images[split:], masks[split:], labels[split:]
     print("train", len(train_x), "val", len(val_x), flush=True)
 
+    if args.neg_shards:
+        negative_x, negative_m, negative_c = [], [], []
+        for path in sorted(glob.glob(os.path.join(args.neg_shards, "roi_neg_p*.npz"))):
+            data = np.load(path)
+            negative_x.append(data["images"])
+            negative_m.append(data["masks"])
+            negative_c.append(data["labels"])
+        if negative_x:
+            nx = np.concatenate(negative_x)
+            nm = np.concatenate(negative_m).astype(np.float32) / 255.0
+            nc = np.concatenate(negative_c)
+            order = np.random.permutation(len(nx))[: args.neg_cap]
+            train_x = np.concatenate([train_x, nx[order]])
+            train_m = np.concatenate([train_m, nm[order]])
+            train_c = np.concatenate([train_c, nc[order]])
+            print("added negatives", len(order), flush=True)
+
     model = RoiInkUNet(base=32).to(device)
+    if args.init:
+        checkpoint = torch.load(args.init, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint["state_dict"])
+        print("initialized from", args.init, flush=True)
     print("params", sum(p.numel() for p in model.parameters()), flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     steps = math.ceil(len(train_x) / args.batch_size)

@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import random
 import sys
 import time
 from multiprocessing import Pool
@@ -78,8 +80,26 @@ def crop_instance(image, mask, box):
     return crop, target
 
 
+def sample_background(image, rng, attempts=24):
+    """采样几乎空白的裁剪作为负样本（目标全 0）。"""
+    height, width = image.shape[:2]
+    for _ in range(attempts):
+        side = rng.uniform(0.04, 0.18) * min(height, width)
+        side = max(int(round(side)), 16)
+        if side >= height or side >= width:
+            continue
+        top = rng.randint(0, height - side)
+        left = rng.randint(0, width - side)
+        crop = image[top:top + side, left:left + side]
+        if float((crop.min(axis=2) < 245).mean()) > 0.01:
+            continue
+        crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
+        return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
+    return None
+
+
 def process(args):
-    png, svg = args
+    png, svg, negatives = args
     stem = os.path.splitext(os.path.basename(png))[0]
     try:
         primitives = list(iter_primitives(svg))
@@ -103,6 +123,15 @@ def process(args):
         crop, target = pair
         target = cv2.dilate(target, np.ones((3, 3), np.uint8), iterations=1)
         out.append((semantic, crop, target))
+    if negatives:
+        rng = random.Random(stem)
+        valid = [class_id for class_id in CLASSES if class_id < 30]
+        for _ in range(negatives):
+            pair = sample_background(image, rng)
+            if pair is None:
+                break
+            class_id = rng.choice(valid) if valid else 0
+            out.append((class_id, pair[0], pair[1]))
     return stem, out
 
 
@@ -116,15 +145,31 @@ def main():
     parser.add_argument("--classes", default="",
                         help="逗号分隔的类别；空串表示 2..29 全部")
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--split-file", default=None,
+                        help="tools/build_splits.py 生成的 splits.json")
+    parser.add_argument("--split-role", default="train",
+                        help="只处理 train_final 中该角色的图片")
+    parser.add_argument("--negatives", type=int, default=0,
+                        help="每张训练图附加的空白负样本数（val 不加）")
     args = parser.parse_args()
     if args.classes.strip():
         globals()["CLASSES"] = tuple(
             int(v) for v in args.classes.split(",") if v.strip())
     os.makedirs(args.out, exist_ok=True)
     pngs = sorted(f for f in os.listdir(args.png_dir) if f.endswith(".png"))
+    keep = None
+    if args.split_file:
+        split = json.loads(open(args.split_file, encoding="utf-8").read())
+        keep = set(split.get("train_final", {}).get(args.split_role, []))
+        if not keep:
+            raise SystemExit(f"split role {args.split_role!r} 为空")
+        pngs = [name for name in pngs if os.path.splitext(name)[0] in keep]
+        print(f"split {args.split_role}: {len(pngs)} 张", flush=True)
     if args.limit:
         pngs = pngs[: args.limit]
-    jobs = [(os.path.join(args.png_dir, p), os.path.join(args.svg_dir, p[:-4] + ".svg"))
+    negatives = args.negatives if args.split_role == "train" else 0
+    jobs = [(os.path.join(args.png_dir, p), os.path.join(args.svg_dir, p[:-4] + ".svg"),
+             negatives)
             for p in pngs
             if os.path.exists(os.path.join(args.svg_dir, p[:-4] + ".svg"))]
     shard = 1500

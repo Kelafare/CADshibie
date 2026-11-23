@@ -141,6 +141,8 @@ class RoiInkRefiner:
     def load(cls, path: str | Path, device: str | None = "auto",
              max_instances: int = 15,
              quality_path: str | Path | None = None) -> "RoiInkRefiner | None":
+        if not str(path).strip():
+            return None
         path = Path(path)
         if not path.exists():
             return None
@@ -287,6 +289,7 @@ class RoiInkRefiner:
                     class_id, confidence, det_box, segments, resized,
                     scale_x, scale_y, canvas_width, canvas_height),
                 "box": (left, top, right, bottom),
+                "det_box": det_box,
             })
         return results
 

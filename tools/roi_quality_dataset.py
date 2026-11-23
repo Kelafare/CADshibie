@@ -28,7 +28,7 @@ from cadvec.layers import load_rgba  # noqa: E402
 from cadvec.roi_ink import RoiInkRefiner  # noqa: E402
 from cadvec.svg import iter_primitives  # noqa: E402
 
-RASTER = 500
+RASTER = 1000
 
 
 def render_gt(primitives, classes):
@@ -40,31 +40,32 @@ def render_gt(primitives, classes):
         if semantic not in classes or instance < 0:
             continue
         key = (semantic, instance)
-        mask = masks.get(key)
-        if mask is None:
-            mask = np.zeros((RASTER, RASTER), dtype=np.uint8)
-            masks[key] = mask
-        points = np.round(
-            np.asarray(primitive.points, dtype=np.float64) * scale).astype(np.int32)
+        image = masks.get(key)
+        if image is None:
+            image = Image.new("1", (RASTER, RASTER), 0)
+            masks[key] = image
+        draw = ImageDraw.Draw(image)
+        points = [(float(x) * scale, float(y) * scale)
+                  for x, y in primitive.points]
         if int(primitive.command) in (0, 1):
-            cv2.polylines(mask, [points.reshape(-1, 1, 2)], False, 1, 1)
+            draw.line(points, fill=1, width=1, joint="curve")
         else:
-            low = points.min(axis=0)
-            high = points.max(axis=0)
-            center = tuple(int(v) for v in (low + high) // 2)
-            axes = tuple(max(int(v), 1) for v in (high - low) // 2)
-            cv2.ellipse(mask, center, axes, 0, 0, 360, 1, 1)
-    return {key: mask.astype(bool) for key, mask in masks.items()}
+            xs, ys = zip(*points)
+            draw.ellipse((min(xs), min(ys), max(xs), max(ys)),
+                         outline=1, width=1)
+    return {key: np.asarray(image, dtype=bool).copy()
+            for key, image in masks.items()}
 
 
 def render_instance(segments):
     scale = RASTER / 100.0
-    mask = np.zeros((RASTER, RASTER), dtype=np.uint8)
+    image = Image.new("1", (RASTER, RASTER), 0)
+    draw = ImageDraw.Draw(image)
     for segment in segments:
-        points = np.round(
-            np.asarray(segment["points"], dtype=np.float64) * scale).astype(np.int32)
-        cv2.polylines(mask, [points.reshape(-1, 1, 2)], False, 1, 1)
-    return mask.astype(bool)
+        points = [(float(x) * scale, float(y) * scale)
+                  for x, y in segment["points"]]
+        draw.line(points, fill=1, width=1, joint="curve")
+    return np.asarray(image, dtype=bool)
 
 
 def iou(first, second):
@@ -97,6 +98,10 @@ def main():
     parser.add_argument("--classes-192", default="2")
     parser.add_argument("--classes-256",
                         default="8,12,14,15,18,19,20,21,22,25,27,28")
+    parser.add_argument("--weights-unified", default="")
+    parser.add_argument("--classes-unified", default="")
+    parser.add_argument("--split-file", default=None)
+    parser.add_argument("--split-role", default="train")
     parser.add_argument("--yolo", default=str(ROOT / "weights" / "yolo_seg.pt"))
     parser.add_argument("--conf", type=float, default=0.2)
     parser.add_argument("--imgsz", type=int, default=640)
@@ -106,7 +111,9 @@ def main():
 
     classes_192 = frozenset(int(v) for v in args.classes_192.split(",") if v.strip())
     classes_256 = frozenset(int(v) for v in args.classes_256.split(",") if v.strip())
-    classes = classes_192 | classes_256
+    classes_unified = frozenset(
+        int(v) for v in args.classes_unified.split(",") if v.strip())
+    classes = classes_192 | classes_256 | classes_unified
 
     import torch
     from ultralytics import YOLO
@@ -114,8 +121,17 @@ def main():
     model = YOLO(args.yolo)
     refiner_192 = RoiInkRefiner.load(args.weights_192, device=args.device)
     refiner_256 = RoiInkRefiner.load(args.weights_256, device=args.device)
+    refiner_unified = (RoiInkRefiner.load(args.weights_unified, device=args.device)
+                       if args.weights_unified and classes_unified else None)
 
     pngs = sorted(f for f in os.listdir(args.png_dir) if f.endswith(".png"))
+    if args.split_file:
+        split = json.loads(open(args.split_file, encoding="utf-8").read())
+        keep = set(split.get("train_final", {}).get(args.split_role, []))
+        if not keep:
+            raise SystemExit(f"split role {args.split_role!r} 为空")
+        pngs = [name for name in pngs if os.path.splitext(name)[0] in keep]
+        print(f"split {args.split_role}: {len(pngs)} 张", flush=True)
     if args.limit:
         pngs = pngs[: args.limit]
     out_path = Path(args.out)
@@ -156,8 +172,12 @@ def main():
                         boxes.append((int(class_id), float(confidence),
                                       tuple(float(v) for v in box)))
             analyzed = []
-            for classes_set, refiner in ((classes_192, refiner_192),
-                                         (classes_256, refiner_256)):
+            plans = [(classes_192, refiner_192), (classes_256, refiner_256)]
+            if refiner_unified is not None:
+                plans.append((classes_unified, refiner_unified))
+            for classes_set, refiner in plans:
+                if refiner is None:
+                    continue
                 subset = [item for item in boxes if item[0] in classes_set]
                 if subset:
                     analyzed.extend(refiner.analyze(
