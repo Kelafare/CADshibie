@@ -43,26 +43,50 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 - weights/vit_strokes.pt：小型 ViT 对象分类器，2,911,525 参数，4 通道
   224×224 输入（白底 RGB + 对象掩码），patch16/宽192/6层/6头；在 GPU 上
   用 bf16 训练 14 轮，验证集 macro-recall 42.65%。
+- weights/yolo_seg.pt：YOLOv8n-seg 实例分割（3,399,033 参数），GT 实例
+  凸包监督，为 hybrid 提供类别接管与 class 8 检测掩码门控。
+- weights/gat_primitive.pt：图元级 GAT（356,373 参数），节点=14 维几何
+  + 256 维图像特征，用于 class 8 实例并集。
+- weights/resnet18_layer3.pt：torchvision ResNet18 conv1–layer3 主干
+  （2,787,279 个张量元素），随包提供，离线环境不再触发权重下载。
+- weights/roi_ink.pt：ROI 实例墨迹细化 U-Net（1,948,847 个张量元素），
+  在 YOLO 检测框内预测实例墨迹并矢量化为 4 点折线；GPU 训练/推理，
+  用于 class 2/8/14/18/22/28。
+- weights/roi_ink_c2.pt：class 2 专用 192×192 ROI 墨迹 U-Net（1,948,847 个
+  张量元素，30 轮，Dice 0.815），默认负责 class 2。
+- weights/roi_ink_256.pt：256×256 ROI 墨迹 U-Net（1,948,847 个张量元素），
+  13 类、1500/类、20 轮（Dice 0.801），负责 class 8/12/14/15/18/19/20/21/22/25/27/28。
+- weights/roi_ink_unified.pt：统一类别条件 256×256 ROI 墨迹 U-Net
+  （1,948,847 个张量元素，30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，
+  Dice 0.760），默认接管 class 26。
+- weights/roi_quality.json：旧版学习式 ROI 实例质量门控（0 参数）。
+- weights/roi_quality_all.json：默认学习式质量门控（旧 13 类 + class 26，0 参数）。
+- weights/roi_ink_all.pt：28 类 ROI 墨迹 U-Net（1,948,847 个张量元素），
+  作为可选消融权重保留（默认关闭）。
+- weights/roi_ink_quality.json：细化实例几何质量门限（0 参数）。
+- weights/label_qa.json：GT 在 300/400/1000px 栅格下的稳定性诊断（0 参数）。
 - 训练标签与评估口径对齐：Thing 且 instance-id=-1 的图元归入忽略类 35；
   对象假设按与 GT 实例的 IoU/覆盖率打标签。
 - dev_final 推理只读取 PNG，不读取任何 SVG 或真值。
 
 五、复现与自检
 --------------
-python -m pytest tests -q                  # 47 passed
+python -m pytest tests -q                  # 56 passed
 python tools/check_compliance.py           # ok: true
-python infer.py --check-only               # 总参数 2,911,525 / 上限 5B
+python infer.py --check-only               # 总参数 19,198,445 / 上限 5B
 
 本地 test_final 全量 1000 张（参考口径 raster 1000、IoU>0.5）：
-hybrid（默认/推荐，--engine hybrid）PQ 2.597%，SQ 62.647%，RQ 4.145%，
-TP/FP/FN = 244/4201/7085；
+hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 统一模型 class 26 + 学习式质量门控 + class8 门控）
+PQ 18.768%，SQ 68.754%，RQ 27.298%，TP/FP/FN = 1687/3344/5642；
+上一版（class2 专用/256）18.235%；更早 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
 v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；v2 起点 1.575%；v1 0。
-泛化校验：calib 500 hybrid 3.096% vs v3 2.320%；holdout 500 2.108% vs 1.456%。
+泛化校验（dHash 分组）：calib 300 19.765%、hold 300 17.446%、final 400 18.911%；
+基线同划分为 19.202% / 16.727% / 18.508%。
 该结果仅用于本地链路诊断，不是官方 dev_final 成绩（官方真值不公开）。
 
 六、目录说明
 ------------
-infer.py                 推理入口（v2 默认，v1 可切换）
+infer.py                 推理入口（hybrid 默认，v2/v1 可切换）
 cadvec/layers.py         精确描边色恢复与颜色层
 cadvec/skeleton.py       骨架折线追踪与 4 点采样
 cadvec/parallel.py       平行线带、端点对齐、轴向吸附

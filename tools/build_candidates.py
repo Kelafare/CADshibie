@@ -32,6 +32,9 @@ def _init(palette_path: str, config_kwargs: dict) -> None:
     _STATE["config"] = InferenceConfig(**config_kwargs)
 
 
+MAX_HYPOTHESES = 240
+
+
 def _process(job: tuple[str, str, str]) -> dict:
     png_path, svg_path, out_dir = job
     name = Path(png_path).stem
@@ -47,10 +50,11 @@ def _process(job: tuple[str, str, str]) -> dict:
     primitives = list(iter_primitives(svg_path))
     masks = gt_segment_masks(primitives, 100, 100)
     samples = gt_samples(primitives) + label_hypotheses(scene, masks)
-    # 假设按总长度排序，只保留较大的 120 个，控制样本量。
+    # 假设按总长度排序，保留较大的 240 个，与推理 max_hypotheses 对齐。
     hypotheses_samples = [item for item in samples if item.get("kind") == "hyp"]
     hypotheses_samples.sort(key=lambda item: -item["length"])
-    samples = [item for item in samples if item.get("kind") == "gt"] + hypotheses_samples[:120]
+    samples = ([item for item in samples if item.get("kind") == "gt"]
+               + hypotheses_samples[:MAX_HYPOTHESES])
     payload = {
         "name": name,
         "width": 100,

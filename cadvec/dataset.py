@@ -370,7 +370,9 @@ def label_hypotheses(
                     "points": [
                         [round(x, 4), round(y, 4)]
                         for x, y in (
-                            [scene.strokes[index].p0, scene.strokes[index].p1]
+                            # 与推理 _stroke_payload 一致：Line 使用骨架四点，
+                            # 不能退化成两个端点，否则训练/推理的第四通道掩码不同。
+                            scene.strokes[index].points
                             if scene.strokes[index].command == 0
                             else scene.strokes[index].resample(32)
                         )

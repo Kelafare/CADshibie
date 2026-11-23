@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "source": "test_final calib/hold 交叉验证（ROI 细化实例几何质量门限）",
+  "rules": {
+    "2": ["total", ">=", 22.0],
+    "8": ["density", ">=", 1.75],
+    "14": ["density", ">=", 1.9],
+    "18": ["aspect", ">=", 0.91],
+    "22": ["density", ">=", 3.05],
+    "28": ["mean", ">=", 0.59]
+  }
+}

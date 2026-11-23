@@ -98,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine", choices=("segdet", "det", "tpl", "hybrid", "gat", "seg", "v2", "v1"), default="hybrid",
-        help="推理引擎：v2=精确颜色层+平行线优化+ViT（默认），v1=旧颜色先验流程",
+        help="推理引擎：hybrid=v3 像素管线 ∪ GAT ∪ YOLO-seg（默认）；v2=像素管线+ViT；v1=旧颜色先验流程",
     )
     parser.add_argument(
         "--palette", default=str(SCRIPT_DIR / "weights" / "stroke_palette.json"),
@@ -150,7 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--inside-fraction", type=float, default=0.5,
-        help="笔画点落在实例掩码内的最小比例（--engine segdet）",
+        help="笔画点落在实例掩码内的最小比例（整条认领模式）",
+    )
+    parser.add_argument(
+        "--segdet-mode", choices=("local", "whole"), default="whole",
+        help="segdet 笔画归属：whole=整条笔画认领（默认，实测更好），local=掩码边界局部切分",
     )
     parser.add_argument(
         "--det-weights", default=str(SCRIPT_DIR / "weights" / "yolo_det.pt"),
@@ -181,8 +185,56 @@ def build_parser() -> argparse.ArgumentParser:
         help="hybrid 引擎最终抑制的类别（PQ 感知门控）",
     )
     parser.add_argument(
+        "--hybrid-gate-classes", default="8",
+        help="hybrid 引擎中要求实例被 YOLO-seg 同类检测掩码支持的类别（逗号分隔，默认 8）",
+    )
+    parser.add_argument(
+        "--hybrid-gate-threshold", type=float, default=0.1,
+        help="实例级门控的最小重叠比例；无同类 YOLO 检测时该实例被丢弃",
+    )
+    parser.add_argument(
+        "--hybrid-gate-metric", choices=("cover", "iou"), default="cover",
+        help="门控重叠度量：cover=交集/较小面积（默认），iou=标准 IoU",
+    )
+    parser.add_argument(
         "--hybrid-segdet-weights", default=str(SCRIPT_DIR / "weights" / "yolo_seg.pt"),
         help="hybrid 引擎使用的 YOLO-seg 权重（不存在则跳过该分支）",
+    )
+    parser.add_argument(
+        "--roi-ink-weights", default=str(SCRIPT_DIR / "weights" / "roi_ink_c2.pt"),
+        help="ROI 实例墨迹细化权重（不存在则关闭细化分支）",
+    )
+    parser.add_argument(
+        "--roi-ink-classes", default="2",
+        help="使用 ROI 墨迹细化的类别（逗号分隔；空串关闭）",
+    )
+    parser.add_argument(
+        "--roi-ink-device", default="auto", choices=("auto", "cuda", "cpu"),
+        help="ROI 墨迹细化设备，默认自动选择 CUDA",
+    )
+    parser.add_argument(
+        "--roi-ink-quality", default=str(SCRIPT_DIR / "weights" / "roi_ink_quality.json"),
+        help="ROI 实例几何质量门限（JSON）；不存在则不过滤",
+    )
+    parser.add_argument(
+        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_all.json"),
+        help="学习式 ROI 实例质量模型（JSON）；不存在则关闭",
+    )
+    parser.add_argument(
+        "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_unified.pt"),
+        help="第二套 ROI 墨迹权重（统一类别条件模型，用于 --roi-ink-aux-classes）",
+    )
+    parser.add_argument(
+        "--roi-ink-aux-classes", default="26",
+        help="第二套 ROI 墨迹权重负责的类别",
+    )
+    parser.add_argument(
+        "--roi-ink-extra-weights", default=str(SCRIPT_DIR / "weights" / "roi_ink_256.pt"),
+        help="第三套 ROI 墨迹权重（可选，空串关闭）",
+    )
+    parser.add_argument(
+        "--roi-ink-extra-classes", default="8,12,14,15,18,19,20,21,22,25,27,28",
+        help="第三套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(
         "--gat-weights", default=str(SCRIPT_DIR / "weights" / "gat_primitive.pt"),
@@ -313,6 +365,10 @@ def _process_one(
     nms_iou: float = 0.0,
     objectness_threshold: float = 0.0,
     max_instances: int = 0,
+    ink_refiner=None,
+    refiner_classes: frozenset = frozenset(),
+    quality_rules=None,
+    refiners=(),
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -326,6 +382,10 @@ def _process_one(
             inside_fraction=segdet["inside_fraction"],
             templates_path=segdet["templates"],
             template_max_score=segdet["template_max_score"],
+            device=segdet.get("device"),
+            local_split=segdet.get("local_split", False),
+            refiner=ink_refiner,
+            refiner_classes=refiner_classes,
         )
         write_output(result["data"], output_dir / f"{path.stem}.json")
         return {"file": path.name, **result["stats"]}
@@ -379,22 +439,37 @@ def _process_one(
             class_policy_path=gat_options["class_policy"],
         )
         segdet_data = None
+        segdet_support = None
         if hybrid.get("segdet") is not None:
             from cadvec.pipeline_segdet import run_image_segdet
             segdet_options = hybrid["segdet"]
-            segdet_data = run_image_segdet(
+            segdet_result = run_image_segdet(
                 path, segdet_options["weights"], config, segdet_options["palette"],
                 canvas_width=width, canvas_height=height,
                 det_conf=segdet_options["det_conf"], det_iou=segdet_options["det_iou"],
                 max_instances=segdet_options["max_instances"],
                 inside_fraction=segdet_options["inside_fraction"],
                 templates_path=None,
-            )["data"]
+                device=segdet_options.get("device"),
+                local_split=segdet_options.get("local_split", False),
+                support_classes=frozenset(hybrid.get("gate_classes", frozenset())),
+                refiner=ink_refiner,
+                refiner_classes=refiner_classes,
+                refiners=refiners,
+            )
+            segdet_data = segdet_result["data"]
+            segdet_support = segdet_result.get("support")
         data = merge_final(
             v2_result.data, gat_result["data"], segdet_data,
             gat_classes=hybrid["classes"],
             segdet_classes=hybrid["segdet_classes"],
+            gate_classes=hybrid.get("gate_classes", frozenset()),
+            gate_threshold=hybrid.get("gate_threshold", 0.1),
+            gate_metric=hybrid.get("gate_metric", "cover"),
+            support=segdet_support,
+            segdet_union_classes=refiner_classes,
             suppress=hybrid["suppress"],
+            quality_rules=quality_rules,
         )
         write_output(data, output_dir / f"{path.stem}.json")
         return {
@@ -541,6 +616,9 @@ def main(argv: list[str] | None = None) -> int:
             "inside_fraction": args.inside_fraction,
             "templates": args.segdet_templates,
             "template_max_score": args.segdet_template_max_score,
+            "device": 0 if (args.vit_device in ("auto", "cuda")
+                            and _cuda_available()) else "cpu",
+            "local_split": args.segdet_mode == "local",
         }
         print("实例分割引擎（YOLO-seg + 笔画矢量化）", file=sys.stderr)
     if args.engine == "det":
@@ -586,6 +664,9 @@ def main(argv: list[str] | None = None) -> int:
             "classes": {int(value) for value in args.hybrid_classes.split(",") if value.strip()},
             "segdet_classes": {int(value) for value in args.segdet_classes.split(",") if value.strip()},
             "suppress": {int(value) for value in args.suppress_classes.split(",") if value.strip()},
+            "gate_classes": {int(value) for value in args.hybrid_gate_classes.split(",") if value.strip()},
+            "gate_threshold": args.hybrid_gate_threshold,
+            "gate_metric": args.hybrid_gate_metric,
             "segdet": {
                 "weights": args.hybrid_segdet_weights,
                 "palette": args.palette,
@@ -593,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
                 "det_iou": 0.5,
                 "max_instances": 10,
                 "inside_fraction": 0.35,
+                "device": 0 if device_name == "cuda" else "cpu",
+                "local_split": args.segdet_mode == "local",
             } if Path(args.hybrid_segdet_weights).exists() else None,
             "gat": {
                 "weights": args.gat_weights,
@@ -606,6 +689,9 @@ def main(argv: list[str] | None = None) -> int:
                 "class_policy": args.class_policy,
             },
         }
+        if hybrid_options["segdet"] is None:
+            print(f"[警告] 未找到 YOLO-seg 权重 {args.hybrid_segdet_weights}，"
+                  "hybrid 将跳过 YOLO-seg 分支（PQ 会下降）", file=sys.stderr)
         palette_path = args.palette
         print(f"hybrid 引擎（GAT classes {sorted(hybrid_options['classes'])}），"
               f"设备 {device_name}", file=sys.stderr)
@@ -659,6 +745,60 @@ def main(argv: list[str] | None = None) -> int:
                 f"[警告] 未找到调色板 {args.palette}，回退到 v1 引擎",
                 file=sys.stderr,
             )
+    roi_refiner = None
+    roi_classes = frozenset(
+        int(value) for value in args.roi_ink_classes.split(",") if value.strip())
+    if roi_classes and args.engine in ("hybrid", "segdet"):
+        if Path(args.roi_ink_weights).exists():
+            from cadvec.roi_ink import RoiInkRefiner
+            roi_refiner = RoiInkRefiner.load(
+                args.roi_ink_weights, device=args.roi_ink_device,
+                quality_path=args.roi_quality_model)
+            if roi_refiner is not None:
+                print(f"ROI 墨迹细化：classes {sorted(roi_classes)}，"
+                      f"设备 {roi_refiner.device}，阈值 {roi_refiner.threshold:.2f}",
+                      file=sys.stderr)
+        else:
+            print(f"[警告] 未找到 ROI 墨迹权重 {args.roi_ink_weights}，"
+                  "细化分支关闭", file=sys.stderr)
+            roi_classes = frozenset()
+    roi_plan = []
+    if roi_refiner is not None and roi_classes:
+        roi_plan.append((frozenset(roi_classes), roi_refiner))
+    aux_classes = frozenset(
+        int(value) for value in args.roi_ink_aux_classes.split(",") if value.strip())
+    if aux_classes and args.engine in ("hybrid", "segdet") and Path(args.roi_ink_weights_aux).exists():
+        from cadvec.roi_ink import RoiInkRefiner
+        aux_refiner = RoiInkRefiner.load(
+            args.roi_ink_weights_aux, device=args.roi_ink_device,
+            quality_path=args.roi_quality_model)
+        if aux_refiner is not None:
+            roi_plan.append((aux_classes, aux_refiner))
+            roi_classes = roi_classes | aux_classes
+            print(f"ROI 墨迹细化（辅助模型）：classes {sorted(aux_classes)}，"
+                  f"设备 {aux_refiner.device}", file=sys.stderr)
+    extra_classes = frozenset(
+        int(value) for value in args.roi_ink_extra_classes.split(",") if value.strip())
+    if extra_classes and args.engine in ("hybrid", "segdet") and Path(
+            args.roi_ink_extra_weights).exists():
+        from cadvec.roi_ink import RoiInkRefiner
+        extra_refiner = RoiInkRefiner.load(
+            args.roi_ink_extra_weights, device=args.roi_ink_device,
+            quality_path=args.roi_quality_model)
+        if extra_refiner is not None:
+            roi_plan.append((extra_classes, extra_refiner))
+            roi_classes = roi_classes | extra_classes
+            print(f"ROI 墨迹细化（第三模型）：classes {sorted(extra_classes)}，"
+                  f"设备 {extra_refiner.device}", file=sys.stderr)
+    quality_rules = {}
+    if roi_classes and Path(args.roi_ink_quality).exists():
+        try:
+            payload = json.loads(Path(args.roi_ink_quality).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        for key, value in (payload.get("rules") or {}).items():
+            if isinstance(value, (list, tuple)) and len(value) == 3:
+                quality_rules[int(key)] = (str(value[0]), str(value[1]), float(value[2]))
     refiner = load_refiner(ExternalApiConfig(
         enabled=args.external_api,
         base_url=args.external_url,
@@ -696,6 +836,10 @@ def main(argv: list[str] | None = None) -> int:
                 class_policy=args.class_policy, nms_iou=args.nms_iou,
                 objectness_threshold=args.objectness_threshold,
                 max_instances=args.max_instances,
+                ink_refiner=roi_refiner,
+                refiner_classes=roi_classes,
+                quality_rules=quality_rules,
+                refiners=tuple(roi_plan),
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:

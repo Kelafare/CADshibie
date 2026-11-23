@@ -113,7 +113,7 @@ def class_weights(paths, sample: int = 300):
 
 def run_epoch(model, paths, optimizer, criterion, device, training: bool,
               edge_pos_weight: float = 2.0, node_features_dir=None,
-              node_feature_dim: int = 0):
+              node_feature_dim: int = 0, scheduler=None):
     if training:
         model.train()
         random.shuffle(paths)
@@ -151,6 +151,10 @@ def run_epoch(model, paths, optimizer, criterion, device, training: bool,
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
+                # OneCycleLR 按“每个优化更新”配置，必须逐图推进，
+                # 否则整轮只走一步，实际学习率曲线与配置不符。
+                if scheduler is not None:
+                    scheduler.step()
             total_loss += float(loss)
             predictions = logits.argmax(dim=1)
             node_correct += int((predictions == labels).sum())
@@ -240,12 +244,11 @@ def main() -> int:
         started = time.perf_counter()
         metrics = run_epoch(model, train_paths, optimizer, criterion, device, True,
                             node_features_dir=args.node_features,
-                            node_feature_dim=node_feature_dim)
+                            node_feature_dim=node_feature_dim,
+                            scheduler=scheduler)
         valid = run_epoch(model, valid_paths, None, criterion, device, False,
                           node_features_dir=args.node_features,
                           node_feature_dim=node_feature_dim)
-        if scheduler.last_epoch < scheduler.total_steps:
-            scheduler.step()
         elapsed = time.perf_counter() - started
         print(f"epoch {epoch + 1}: train loss {metrics['loss']:.3f} "
               f"node {metrics['node_accuracy']:.3f} fg {metrics['foreground_accuracy']:.3f} "

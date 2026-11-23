@@ -28,7 +28,7 @@
       "name": "unit_tests",
       "command": "python -m pytest tests -q",
       "status": "passed",
-      "detail": "47 passed"
+      "detail": "56 passed"
     },
     {
       "name": "schema_validation",
@@ -58,7 +58,7 @@
       "name": "model_parameter_audit",
       "command": "python infer.py --check-only",
       "status": "passed",
-      "detail": "总参数量 2,911,525（ViT 状态字典），颜色调色板/颜色先验 0 参数，上限 5,000,000,000"
+      "detail": "总参数量 19,198,445（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 五套 ROI 墨迹 U-Net 各 1,948,847），上限 5,000,000,000"
     },
     {
       "name": "vit_training",
@@ -94,7 +94,7 @@
       "name": "local_test_final_eval_hybrid_full",
       "command": "python infer.py --input test_final --output pred_json --engine hybrid --workers 8 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 1000",
       "status": "passed",
-      "detail": "test_final 全量 1000 张：PQ=2.597%, SQ=62.647%, RQ=4.145%, TP/FP/FN=244/4201/7085（v3 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 门控）"
+      "detail": "test_final 全量 1000 张（未加 class8 掩码门控的上一版）：PQ=2.597%, SQ=62.647%, RQ=4.145%, TP/FP/FN=244/4201/7085"
     },
     {
       "name": "engine_comparison_full",
@@ -113,6 +113,90 @@
       "command": "逐步消融（全量 1000）",
       "status": "passed",
       "detail": "v2 1.575% → +类抑制/NMS 1.654% → +objectness 微调 1.731% → +top-12 1.884% → +GAT class8 2.190% → +YOLO-seg 类别 2.439% → +PQ 感知类别门控 2.597%"
+    },
+    {
+      "name": "local_test_final_eval_hybrid_gate_full",
+      "command": "python infer.py --input test_final --output pred --engine hybrid --workers 6 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "当前默认（class 8 检测掩码门控，cover>0.10）：PQ=2.893%, SQ=62.177%, RQ=4.653%, TP/FP/FN=238/2664/7091；class 8 131/2899/886→125/1362/892；calib 3.094→3.468%，holdout 2.109→2.332%"
+    },
+    {
+      "name": "segdet_local_split_experiment",
+      "command": "python infer.py --engine segdet --segdet-mode local --input test_final --output pred",
+      "status": "passed",
+      "detail": "掩码边界切分笔画（A0）全量 1000：PQ=1.481%，低于整条认领 1.673%；默认关闭，保留 --segdet-mode local 供后续更精确掩码复用"
+    },
+    {
+      "name": "local_test_final_eval_roi_ink_full",
+      "command": "python infer.py --input test_final --output pred --engine hybrid --workers 6 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "当前默认（ROI 墨迹细化 class 2/8/14/18/22/28 + class8 门控）：PQ=11.804%, SQ=66.240%, RQ=17.820%, TP/FP/FN=1318/6145/6011；calib 12.356%、holdout 11.262%；class2 423/1261/973、class8 462/1971/555；1000 张 0 错误、0.535 s/张、303,026 图元，schema 全部通过"
+    },
+    {
+      "name": "roi_ink_training",
+      "command": "python tools/build_roi_ink.py ... && python tools/train_roi_ink.py --epochs 20",
+      "status": "passed",
+      "detail": "train_final 4000 张、10 类、12,393 实例；RTX 3060 bf16 20 轮；验证 Dice 0.767、mask IoU 0.622"
+    },
+    {
+      "name": "local_test_final_eval_roi_ink_final",
+      "command": "python infer.py --input test_final --output pred --engine hybrid --workers 6 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "当前默认（双模型 ROI 细化 + 实例几何质量门控 + class8 门控）：PQ=13.995%, SQ=65.891%, RQ=21.239%, TP/FP/FN=1392/4387/5937；calib 14.419%、holdout 13.576%；1000 张 0 错误、0.713 s/张、298,540 图元，schema 全部通过"
+    },
+    {
+      "name": "roi_ink_quality_cross_validation",
+      "command": "calib 选阈值、holdout 验证逐类几何质量门限",
+      "status": "passed",
+      "detail": "在最终输出上按类精确重算：calib 12.356→13.935%，holdout 11.262→12.560%，全量 11.804→13.244%（单模型）；门限规则见 weights/roi_ink_quality.json"
+    },
+    {
+      "name": "local_test_final_eval_roi_256_routed",
+      "command": "python infer.py --input test_final --output pred --engine hybrid --workers 6 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "当前默认（192 模型 class 2 + 256 模型其余 12 类 + 质量门控）：PQ=16.250%, SQ=67.426%, RQ=24.101%, TP/FP/FN=1591/4283/5738；calib 16.170%、holdout 16.329%；1000 张 0 错误、0.78 s/张、323,387 图元，schema 全部通过"
+    },
+    {
+      "name": "local_test_final_eval_roi_c2_quality_final",
+      "command": "python infer.py --input test_final --output pred --engine hybrid --workers 8 && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "当前默认（class2 专用 192 + 256 模型 + 学习式质量门控 + 几何门控）：PQ=18.235%, SQ=68.557%, RQ=26.598%, TP/FP/FN=1648/3415/5681；calib 18.403%、holdout 18.069%；class2 TP 499（上一版 392）；1000 张 0 错误，schema 全部通过"
+    },
+    {
+      "name": "roi_quality_learned_gate",
+      "command": "tools/roi_quality_dataset.py + tools/train_roi_quality.py + tools/eval_roi_quality.py",
+      "status": "passed",
+      "detail": "train_final 2000 张、12,924 行、15 维特征、逐类逻辑回归；test 行级 ROI 类 PQ 33.48→38.20%；全量 16.250→16.886%"
+    },
+    {
+      "name": "r0_loss_attribution",
+      "command": "python tools/diagnose_r0.py --pred-dir pred --gt-dir gt_json --raster 1000",
+      "status": "passed",
+      "detail": "Thing-only TP/FP/FN=1642/3367/5246；FN 原因：无候选 3048、严重错位 1119、近阈值 1036、错类 40；FP 原因：无 GT 重叠 1036、近阈值 1116、多余/错位 1159。class 3 有 819 GT、0 输出"
+    },
+    {
+      "name": "r1_grouped_splits",
+      "command": "python tools/build_splits.py --train-dir train_final --test-dir test_final",
+      "status": "passed",
+      "detail": "64 位 dHash、Hamming≤4 分组；train 3400/val 600（3540 组），calib 300/hold 300/final 400（970 组）；final 未参与任何模型、阈值或类别选择"
+    },
+    {
+      "name": "r1_label_qa",
+      "command": "python tools/label_qa.py --gt-dir gt_json --out weights/label_qa.json",
+      "status": "passed",
+      "detail": "1000px 下无 <8 像素实例；300/400px 与 1000px 的 IoU>0.5 稳定率 0–45%，故统一使用 raster 1000 + PIL"
+    },
+    {
+      "name": "r2_unified_roi_training",
+      "command": "python tools/build_roi_ink.py ... --size 256 && python tools/train_roi_ink.py ... --epochs 24",
+      "status": "passed",
+      "detail": "30 个 Thing 类、21,284 实例 + 4,926 难负例；A30 bf16 24 轮；验证 Dice 0.7598、mask IoU 0.6126；class 26 Dice 0.846/IoU 0.733"
+    },
+    {
+      "name": "r2_local_test_final_eval",
+      "command": "python infer.py --input test_final --output pred --engine hybrid && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "统一模型接管 class 26：PQ=18.768%, SQ=68.754%, RQ=27.298%, TP/FP/FN=1687/3344/5642；class 26 TP 32→72、FP 108→44、FN 101→61；calib 19.765%、hold 17.446%、final 18.911%（基线 19.202/16.727/18.508）；1000 张 0 错误"
     }
   ],
   "model": {
@@ -122,7 +206,17 @@
     "training_target": "Thing 且 instance-id=-1 归入忽略类 35；假设与 GT 按 IoU/覆盖率打标签",
     "primitive_gat": "weights/gat_primitive.pt，356,373 参数，节点=14 维几何+256 维 ResNet18 图像特征，4 层图注意力+极坐标边编码，语义+邻接双头",
     "hybrid": "cadvec/hybrid.py：v3 提供 class 8 以外的图元，GAT 提供 class 8",
-    "instance_seg": "weights/yolo_seg.pt，YOLOv8n-seg（约 3.40M 参数），GT 实例凸包监督；为 hybrid 提供完整实例候选"
+    "instance_seg": "weights/yolo_seg.pt，YOLOv8n-seg（约 3.40M 参数），GT 实例凸包监督；为 hybrid 提供完整实例候选",
+    "resnet18_backbone": "weights/resnet18_layer3.pt，2,787,279 张量元素，GAT 节点图像特征主干，随包离线提供",
+    "roi_ink_refiner": "weights/roi_ink.pt，1,948,847 个张量元素，192×192 类别条件 U-Net；YOLO 检测框内预测实例墨迹，骨架矢量化为 4 点短折线",
+    "roi_ink_refiner_all": "weights/roi_ink_all.pt，1,948,847 个张量元素，28 类全量 ROI 墨迹 U-Net；负责 class 12/15/19/20/21/25/27",
+    "roi_ink_quality": "weights/roi_ink_quality.json，逐类几何质量门限（0 参数）",
+    "roi_ink_refiner_256": "weights/roi_ink_256.pt，1,948,847 个张量元素，256×256 ROI 墨迹 U-Net（13 类、1500/类、20 轮，Dice 0.801）；负责 class 8/12/14/15/18/19/20/21/22/25/27/28",
+    "roi_ink_refiner_c2": "weights/roi_ink_c2.pt，1,948,847 个张量元素，class 2 专用 192×192 U-Net（30 轮，Dice 0.815）",
+    "roi_ink_refiner_unified": "weights/roi_ink_unified.pt，1,948,847 个张量元素，统一类别条件 256×256 U-Net（30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，Dice 0.760）；默认接管 class 26",
+    "roi_quality": "weights/roi_quality.json，旧版学习式逐类质量门控（0 参数）",
+    "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 统一模型 class 26 的学习式质量门控（0 参数）",
+    "label_qa": "weights/label_qa.json，GT 在 300/400/1000px 栅格下的稳定性统计（0 参数）"
   },
   "synthetic_pq_diagnostic": {
     "note": "仅为合成数据上的链路诊断，不是官方 dev/test 成绩，也不能当作正式评测依据。",
@@ -153,5 +247,5 @@
     "external_data": "未使用",
     "hardcoded_answers": false
   },
-  "generated_at": "2026-11-21"
+  "generated_at": "2026-11-22"
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "limit": 5000000000,
-  "total_parameters": 6666931,
+  "total_parameters": 19198445,
   "external_network_required": false,
   "external_apis": [],
   "models": [
@@ -31,6 +31,15 @@
       "parameter_source": "torch-state-dict",
       "optional": true,
       "description": "图元级 GAT 全景检测（节点=笔画，14 维几何 + 256 维 ResNet18 图像特征，极坐标边编码，语义+邻接双头），用于 --engine gat / hybrid。"
+    },
+    {
+      "name": "resnet18-feature-trunk",
+      "kind": "cnn-feature-backbone",
+      "path": "resnet18_layer3.pt",
+      "parameters": 2787279,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "torchvision ResNet18（ImageNet1K V1）conv1–layer3 主干，为 GAT 节点提供 256 维图像特征。权重随包提供，避免离线环境触发 torchvision 下载。"
     },
     {
       "name": "stroke-palette",
@@ -66,6 +75,78 @@
       "parameters": 0,
       "optional": true,
       "description": "v1 颜色先验查找表；v2 引擎不依赖它，保留用于兼容。"
+    },
+    {
+      "name": "roi-ink-refiner",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "ROI 实例墨迹细化 U-Net（1.95M 参数，192×192 三通道 + 类别条件），在 YOLO 检测框内预测实例墨迹并矢量化为 4 点折线；用于 class 2/8/14/18/22/28。"
+    },
+    {
+      "name": "roi-ink-quality",
+      "kind": "decision-policy",
+      "path": "roi_ink_quality.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "ROI 细化实例的几何质量门限（墨迹总长/密度/长宽比等），calib 选阈值、holdout 验证，0 参数。"
+    },
+    {
+      "name": "roi-ink-refiner-all",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_all.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "全类别 ROI 实例墨迹 U-Net（1.95M 参数，28 个 Thing 类），用于主模型未覆盖的类别（12/15/19/20/21/25/27）。"
+    },
+    {
+      "name": "roi-ink-refiner-256",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_256.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "256×256 ROI 实例墨迹 U-Net（1.95M 参数，13 个启用类别，1500/类、20 轮，验证 Dice 0.801/IoU 0.667）；负责 8/12/14/15/18/19/20/21/22/25/27/28，class 2 仍由 192 主模型处理。"
+    },
+    {
+      "name": "roi-quality",
+      "kind": "decision-policy",
+      "path": "roi_quality.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "学习式 ROI 实例质量门控（逐类逻辑回归，15 维概率/几何特征；train_final 2000 张拟合、calib/holdout 验证），0 参数（系数以 JSON 存储）。"
+    },
+    {
+      "name": "roi-ink-refiner-c2",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_c2.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "class 2 专用 192×192 ROI 墨迹 U-Net（1.95M 参数，train_final 全部 class 2 实例、5000 上限、30 轮，验证 Dice 0.815）；默认主模型只负责 class 2。"
+    },
+    {
+      "name": "roi-ink-unified",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_unified.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "统一类别条件 ROI 墨迹 U-Net（256×256，30 个 Thing 类；train_final 21,284 实例 + 4,926 难负例，24 轮，验证 Dice 0.760/IoU 0.613）。默认负责 class 26；同一权重可按类扩展，替代逐类专用模型。"
+    },
+    {
+      "name": "roi-quality-all",
+      "kind": "decision-policy",
+      "path": "roi_quality_all.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "学习式 ROI 质量门控（旧 13 类 + 统一模型 class 26；15 维概率/几何特征逐类逻辑回归），0 参数。"
     }
   ]
 }
