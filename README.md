@@ -10,10 +10,11 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 23.313%**，SQ 68.766%，
-  RQ 33.902%，TP/FP/FN = 2158/3244/5171（hybrid + class 8 门控 +
-  class2 专用/256 ROI 细化 + 512 统一类别条件 ROI 模型接管 3/4/26/29 +
-  全图 Stuff 语义分支接管 30/31/32/33/34 + 学习式与几何双重质量门控）。
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 23.896%**，SQ 68.843%，
+  RQ 34.711%，TP/FP/FN = 2162/2966/5167（hybrid + class 8 门控 +
+  class2 专用/256 ROI 细化 + 512 统一类别条件 ROI 模型接管 3/4/22/26/29 +
+  全图 Stuff 语义分支接管 30/31/32/33/34 + 学习式与几何双重质量门控；
+  class 16/23 抑制）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
   （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
   + class 8 检测掩码门控 + ROI 实例墨迹细化 + 512 统一类别条件模型
@@ -174,12 +175,12 @@ python infer.py --input /data/dev_final --output /results \
 | `--hybrid-gate-metric cover/iou` | 重叠度量：`cover`=交集/较小面积（默认），`iou`=标准 IoU |
 | `--roi-ink-weights PATH` | ROI 实例墨迹细化权重，默认 `weights/roi_ink_c2.pt`；缺失则关闭 |
 | `--roi-ink-classes 2` | 主 ROI 权重（class 2 专用 192 模型）负责的类别 |
-| `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,22,25,27,28` | 256 ROI 权重负责的类别 |
+| `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,25,27,28` | 256 ROI 权重负责的类别 |
 | `--roi-ink-device auto/cuda/cpu` | 细化器设备，默认自动 CUDA |
 | `--roi-ink-quality PATH` | 细化实例几何质量门限 JSON，默认 `weights/roi_ink_quality.json`；缺失则不过滤 |
 | `--roi-ink-weights-aux PATH` | 512 统一类别条件 ROI 权重，默认 `weights/roi_ink_512.pt` |
-| `--roi-ink-aux-classes 3,4,26,29` | 512 统一类别模型默认负责的类别（可扩到 `0..29`） |
-| `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_512_all.json` |
+| `--roi-ink-aux-classes 3,4,22,26,29` | 512 统一类别模型默认负责的类别（可扩到 `0..29`） |
+| `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_512c_all.json` |
 | `--stuff-weights PATH` | 全图 Stuff 语义分支权重，默认 `weights/stuff_unet.pt`；缺失则关闭 |
 | `--stuff-thresholds PATH` | Stuff 逐类概率阈值/最小面积，默认 `weights/stuff_thresholds.json` |
 | `--stuff-device auto/cuda/cpu` | Stuff 分支设备，默认自动 CUDA |
@@ -372,7 +373,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid + 512 统一模型 + 全图 Stuff 分支（当前默认，最终）** | **23.313%** | 68.766% | 33.902% | 2158 / 3244 / 5171 |
+| **hybrid + 512 统一模型 + 全图 Stuff 分支 + 精度再平衡（当前默认，最终）** | **23.896%** | 68.843% | 34.711% | 2162 / 2966 / 5167 |
+| hybrid + 512 统一模型 + 全图 Stuff 分支 | 23.313% | 68.766% | 33.902% | 2158 / 3244 / 5171 |
 | hybrid + 512 统一模型接管 3/4/26/29 | 22.696% | 68.733% | 33.020% | 2038 / 2977 / 5291 |
 | hybrid + 统一类别 ROI 接管 class 26（上一版） | 18.768% | 68.754% | 27.298% | 1687 / 3344 / 5642 |
 | hybrid + class2 专用/256 + 学习式质量门控 | 18.235% | 68.557% | 26.598% | 1648 / 3415 / 5681 |
@@ -389,8 +391,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
 泛化校验（R1 感知哈希分组划分，test_final 300/300/400）：calib
-**24.707%**（基线 19.202%）、hold **22.130%**（基线 16.727%）、从未参与任何选择
-的 final **23.105%**（基线 18.508%），三个子集同向。上一版按旧 500/500
+**25.098%**（基线 19.202%）、hold **22.794%**（基线 16.727%）、从未参与任何选择
+的 final **23.759%**（基线 18.508%），三个子集同向。上一版按旧 500/500
 随机划分的 18.403% / 18.069% 仅作参考。完整消融见 `OPTIMIZATION.md`
 第 7、11、14、15、16、17 节，文献与路线见 `RESEARCH_PLAN.md`。
 

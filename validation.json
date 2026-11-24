@@ -227,6 +227,18 @@
       "command": "python tools/train_stuff_unet.py --shards train_tiles --epochs 40 --gpus all && python tools/tune_stuff_thresholds.py ... && python infer.py ... --stuff-weights weights/stuff_unet.pt",
       "status": "passed",
       "detail": "train_final 1,598 张/14,382 块，双 A30 DataParallel，best val mIoU 0.333；calib 全图阈值/面积标定；全量 PQ=23.313%, SQ=68.766%, RQ=33.902%, TP/FP/FN=2158/3244/5171；calib 24.707%、hold 22.130%、final 23.105%；Stuff TP +120，Thing 不变；1000 张中 1 张瞬时 OOM 已单图重跑"
+    },
+    {
+      "name": "step1_precision_rebalance",
+      "command": "python infer.py ... --roi-ink-aux-classes 3,4,26,29,22 --suppress-classes 2,11,14,17,18,21,22,30,34,16,23 --roi-quality-model weights/roi_quality_512c_all.json",
+      "status": "passed",
+      "detail": "512 扩 class 22（FP 41→23，TP 不变）+ 抑制 16/23（TP 3、FP 182）：全量 PQ=23.896%, SQ=68.843%, RQ=34.711%, TP/FP/FN=2162/2966/5167；calib 25.098%、hold 22.794%、final 23.759%；class 8 门控后移实验无收益已回退"
+    },
+    {
+      "name": "detail_head_feasibility",
+      "command": "python tools/build_detail_roi.py ... && python tools/train_detail_unet.py ... && python tools/eval_detail_unet.py ...",
+      "status": "passed",
+      "detail": "100 张/646 实例、384 native 补白、30 轮；20 张留出矢量 IoU coarse 0.453→detail 0.480，命中率 47%；class 2/4/8 有提升但幅度不足以证明端到端 PQ，未接入默认"
     }
   ],
   "model": {
@@ -247,7 +259,8 @@
     "roi_ink_refiner_512": "weights/roi_ink_512.pt，1,948,847 个张量元素，512×512 统一类别条件 U-Net（从 256 微调 10 轮，Dice 0.696）；默认接管 class 3/4/26/29",
     "roi_quality": "weights/roi_quality.json，旧版学习式逐类质量门控（0 参数）",
     "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 256 模型 class 26 的质量门控（0 参数）",
-    "roi_quality_512_all": "weights/roi_quality_512_all.json，旧 13 类 + class 3/4/26/29 的默认质量门控（0 参数）",
+    "roi_quality_512_all": "weights/roi_quality_512_all.json，旧 13 类 + class 3/4/26/29 的质量门控（0 参数）",
+    "roi_quality_512c_all": "weights/roi_quality_512c_all.json，默认质量门控（512 扩 class 22，calib 重标定，0 参数）",
     "stuff_unet": "weights/stuff_unet.pt，1,929,971 个张量元素，全图 Stuff 语义 U-Net（30–34，512 分块，best val mIoU 0.333）",
     "stuff_thresholds": "weights/stuff_thresholds.json，Stuff 逐类概率阈值与最小面积（0 参数）",
     "label_qa": "weights/label_qa.json，GT 在 300/400/1000px 栅格下的稳定性统计（0 参数）"

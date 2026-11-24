@@ -181,7 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="hybrid 引擎中由 YOLO-seg 接管的类别",
     )
     parser.add_argument(
-        "--suppress-classes", default="2,11,14,17,18,21,22,30,34",
+        "--suppress-classes", default="2,11,14,17,18,21,22,30,34,16,23",
         help="hybrid 引擎最终抑制的类别（PQ 感知门控）",
     )
     parser.add_argument(
@@ -217,7 +217,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="ROI 实例几何质量门限（JSON）；不存在则不过滤",
     )
     parser.add_argument(
-        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_512_all.json"),
+        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_512c_all.json"),
         help="学习式 ROI 实例质量模型（JSON）；不存在则关闭",
     )
     parser.add_argument(
@@ -236,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="第二套 ROI 墨迹权重（512 统一类别条件模型，用于 --roi-ink-aux-classes）",
     )
     parser.add_argument(
-        "--roi-ink-aux-classes", default="3,4,26,29",
+        "--roi-ink-aux-classes", default="3,4,26,29,22",
         help="第二套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(
@@ -244,7 +244,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="第三套 ROI 墨迹权重（可选，空串关闭）",
     )
     parser.add_argument(
-        "--roi-ink-extra-classes", default="8,12,14,15,18,19,20,21,22,25,27,28",
+        "--roi-ink-extra-classes", default="8,12,14,15,18,19,20,21,25,27,28",
         help="第三套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(

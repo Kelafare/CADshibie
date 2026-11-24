@@ -381,6 +381,7 @@ class RoiInkRefiner:
                 "features": self._features(
                     class_id, confidence, det_box, segments, resized,
                     scale_x, scale_y, canvas_width, canvas_height),
+                "probability": resized,
                 "box": (left, top, right, bottom),
                 "det_box": det_box,
             })

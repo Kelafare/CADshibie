@@ -167,6 +167,15 @@
       "description": "512 模型的质量门控（旧 13 类 + class 3/4/26/29；train_final val 拟合、calib 1000px 选阈值），0 参数。"
     },
     {
+      "name": "roi-quality-512c-all",
+      "kind": "decision-policy",
+      "path": "roi_quality_512c_all.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "精度再平衡后的默认质量门控（512 扩 class 22；calib 重标定），0 参数。"
+    },
+    {
       "name": "stuff-unet",
       "kind": "cnn-semantic-segmenter",
       "path": "stuff_unet.pt",

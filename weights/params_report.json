@@ -170,6 +170,15 @@
         "size_bytes": 22607
       },
       {
+        "name": "roi-quality-512c-all",
+        "kind": "decision-policy",
+        "path": "roi_quality_512c_all.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 22520
+      },
+      {
         "name": "stuff-unet",
         "kind": "cnn-semantic-segmenter",
         "path": "stuff_unet.pt",
