@@ -287,6 +287,12 @@
       "command": "python tools/sift_rerank.py --gt-dir gt_calib --pred-dir aint_calib --sift-jsonl sift_calib.jsonl",
       "status": "passed",
       "detail": "5 类 Thing PQ 24.018→24.041%（+0.023），class 3/22 TP 分数略高、class 8/18/28 方向相反或重叠；会丢 2 TP，分数不足以做可靠门控，不采纳"
+    },
+    {
+      "name": "atom_level_anchor_assignment",
+      "command": "python tools/build_atom_affinity.py ... && python tools/train_atom_affinity.py ... && python infer.py ... --atom-assign-classes 3,28",
+      "status": "passed",
+      "detail": "43.7 万对、12 维特征、共享逻辑回归；calib 25.337→25.819%（class 3 TP 59→70、class 28 27→30）；全量 PQ 24.068→24.348%，SQ 68.137、RQ 35.734、TP/FP/FN=2186/2720/5143；hold 23.168%、final 24.083%"
     }
   ],
   "model": {
@@ -311,6 +317,7 @@
     "roi_quality_512c_all": "weights/roi_quality_512c_all.json，默认质量门控（512 扩 class 22，calib 重标定，0 参数）",
     "stuff_unet": "weights/stuff_unet.pt，1,929,971 个张量元素，全图 Stuff 语义 U-Net（30–34，512 分块，best val mIoU 0.333）",
     "stuff_thresholds": "weights/stuff_thresholds.json，Stuff 逐类概率阈值与最小面积（0 参数）",
+    "atom_affinity": "weights/atom_affinity.json，原子级 atom-anchor 亲和力（12 维几何特征、共享逻辑回归，0 参数）",
     "label_qa": "weights/label_qa.json，GT 在 300/400/1000px 栅格下的稳定性统计（0 参数）"
   },
   "synthetic_pq_diagnostic": {

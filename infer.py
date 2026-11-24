@@ -201,6 +201,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="学习式 atom-anchor 亲和力 JSON；不存在则回退硬阈值",
     )
     parser.add_argument(
+        "--atom-assign-classes", default="3,28",
+        help="B-lite v3 原子级归属类别；空串关闭",
+    )
+    parser.add_argument(
+        "--atom-affinity-model", default=str(SCRIPT_DIR / "weights" / "atom_affinity.json"),
+        help="原子级亲和力 JSON",
+    )
+    parser.add_argument(
         "--hybrid-gate-threshold", type=float, default=0.1,
         help="实例级门控的最小重叠比例；无同类 YOLO 检测时该实例被丢弃",
     )
@@ -396,6 +404,8 @@ def _process_one(
     anchor_classes=frozenset(),
     anchor_inside: float = 0.6,
     anchor_affinity=None,
+    atom_classes=frozenset(),
+    atom_affinity=None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -507,6 +517,14 @@ def _process_one(
                                 int(size[1]), int(size[0]),
                                 inside=anchor_inside,
                                 affinity=anchor_affinity)
+        if atom_classes and atom_affinity and segdet_support:
+            detections = segdet_support.get("detections") or []
+            size = segdet_support.get("size") or (0, 0)
+            if detections and size[0] > 0 and size[1] > 0:
+                from cadvec.atom_assign import assign_atoms
+                data = assign_atoms(data, detections, set(atom_classes),
+                                    int(size[1]), int(size[0]),
+                                    atom_affinity)
         if stuff_branch is not None:
             from cadvec.stuff_branch import append_stuff
             stuff_items = stuff_branch.infer(path)
@@ -848,6 +866,14 @@ def main(argv: list[str] | None = None) -> int:
                 Path(args.anchor_affinity_model).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             anchor_affinity = None
+    atom_affinity = None
+    if (args.atom_assign_classes.strip()
+            and Path(args.atom_affinity_model).exists()):
+        try:
+            atom_affinity = json.loads(
+                Path(args.atom_affinity_model).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            atom_affinity = None
     stuff_branch = None
     if args.engine == "hybrid" and Path(args.stuff_weights).exists():
         from cadvec.stuff_branch import StuffBranch
@@ -904,6 +930,10 @@ def main(argv: list[str] | None = None) -> int:
                     if value.strip()),
                 anchor_inside=args.anchor_assign_inside,
                 anchor_affinity=anchor_affinity,
+                atom_classes=frozenset(
+                    int(value) for value in args.atom_assign_classes.split(",")
+                    if value.strip()),
+                atom_affinity=atom_affinity,
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:

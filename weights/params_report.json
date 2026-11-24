@@ -179,6 +179,15 @@
         "size_bytes": 22520
       },
       {
+        "name": "atom-affinity",
+        "kind": "decision-policy",
+        "path": "atom_affinity.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 1124
+      },
+      {
         "name": "anchor-assign",
         "kind": "decision-policy",
         "path": "anchor_assign.json",

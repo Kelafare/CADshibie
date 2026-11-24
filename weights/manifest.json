@@ -176,6 +176,15 @@
       "description": "精度再平衡后的默认质量门控（512 扩 class 22；calib 重标定），0 参数。"
     },
     {
+      "name": "atom-affinity",
+      "kind": "decision-policy",
+      "path": "atom_affinity.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "原子级 atom-anchor 亲和力（12 维几何特征、共享逻辑回归；train_final 1000 张/43.7 万对，按图纸留出），0 参数。默认仅用于 class 3/28。"
+    },
+    {
       "name": "anchor-assign",
       "kind": "decision-policy",
       "path": "anchor_assign.json",
