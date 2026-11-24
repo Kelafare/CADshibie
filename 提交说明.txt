@@ -76,6 +76,9 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 - 训练标签与评估口径对齐：Thing 且 instance-id=-1 的图元归入忽略类 35；
   对象假设按与 GT 实例的 IoU/覆盖率打标签。
 - dev_final 推理只读取 PNG，不读取任何 SVG 或真值。
+- 开源预训练声明：ResNet18（ImageNet1K，torchvision）作为 GAT 特征主干；
+  YOLO A/B 实验使用 COCO/ImageNet 初始化的 yolov8n-seg 权重，仅用于对照，
+  未进入默认提交权重；未使用任何私有数据集（赛题允许开源数据并声明）。
 
 五、复现与自检
 --------------

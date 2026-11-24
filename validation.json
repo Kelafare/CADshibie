@@ -239,6 +239,12 @@
       "command": "python tools/build_detail_roi.py ... && python tools/train_detail_unet.py ... && python tools/eval_detail_unet.py ...",
       "status": "passed",
       "detail": "100 张/646 实例、384 native 补白、30 轮；20 张留出矢量 IoU coarse 0.453→detail 0.480，命中率 47%；class 2/4/8 有提升但幅度不足以证明端到端 PQ，未接入默认"
+    },
+    {
+      "name": "yolo_pretraining_ab",
+      "command": "python tools/train_yolo_ab.py --model yolov8n-seg.yaml|yolov8n-seg.pt --epochs 40 --device 0,1",
+      "status": "passed",
+      "detail": "同数据同增强：从零 mask mAP50=0.539/mAP50-95=0.309；COCO/ImageNet 初始化 0.753/0.520（+0.214/+0.211）。端到端：calib 25.714%/hold 22.830%/final 23.216%，相对现有默认 25.098/22.794/23.759，final 为负，故不替换默认；预训练仅作为基线要求保留"
     }
   ],
   "model": {

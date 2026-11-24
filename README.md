@@ -227,7 +227,7 @@ v2 引擎（默认）分五步，详细说明见 `METHOD.md`：
 | 模型参数总量 ≤ 5B | 审计总量 23,077,263（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 + Stuff U-Net 1,929,971）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
 | 容器、启动命令、依赖版本、模型清单 | `Dockerfile`、`run.sh`、`requirements.txt`、`weights/manifest.json`、`environment.json` |
 | 验证 JSON | `validation.json` 记录输出契约、测试/自检结果；`infer.py` 输出逐图 JSON 并由 `validate_output` 校验 |
-| 仅使用主办方数据 | 只使用 `train_final`/`test_final` 的 SVG 构建先验与可选分类器，`dev_final` 只读 PNG；未使用任何外部数据 |
+| 数据与开源权重 | 训练/校准只使用主办方 `train_final`/`test_final`；使用公开开源预训练权重：torchvision ResNet18（ImageNet1K）作 GAT 特征主干，YOLOv8n-seg 的 COCO/ImageNet 初始化仅用于 A/B 实验并在 `OPTIMIZATION.md` §20 声明；未使用私有数据集；`dev_final` 只读 PNG |
 | 禁止测试真值/答案查找 | `infer.py` 只 glob `*.png`，不导入 `cadvec.svg`；无按文件名/ID 的硬编码映射；`tools/check_compliance.py` 会扫描并阻断 |
 | 结果可复现 | 固定依赖版本、固定种子、确定性流程；单图输出与线程数无关 |
 
