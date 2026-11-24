@@ -281,6 +281,12 @@
       "command": "python tools/sift_probe.py ... && python tools/sift_self_template.py ... --dump ... && python tools/sift_merge.py ...",
       "status": "passed",
       "detail": "跨图 GT 模板 SIFT 0 TP；同图自模板在 calib 300 上 class 3 召回 71.4%/精度 86.4%、class 22 53.1%/90.8%、class 28 58.9%/96.6%，但接入 512 ROI 后新增实例 0，calib 仍 25.337%，故不进入默认"
+    },
+    {
+      "name": "sift_rerank_probe",
+      "command": "python tools/sift_rerank.py --gt-dir gt_calib --pred-dir aint_calib --sift-jsonl sift_calib.jsonl",
+      "status": "passed",
+      "detail": "5 类 Thing PQ 24.018→24.041%（+0.023），class 3/22 TP 分数略高、class 8/18/28 方向相反或重叠；会丢 2 TP，分数不足以做可靠门控，不采纳"
     }
   ],
   "model": {
