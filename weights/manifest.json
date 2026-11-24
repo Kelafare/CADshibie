@@ -176,6 +176,15 @@
       "description": "精度再平衡后的默认质量门控（512 扩 class 22；calib 重标定），0 参数。"
     },
     {
+      "name": "anchor-assign",
+      "kind": "decision-policy",
+      "path": "anchor_assign.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "B-lite 锚点整实例重归属（class 3/8/18/22/28，实例原子平均落入同类 YOLO 框 ≥0.6；0 参数，规则内置于 infer）。"
+    },
+    {
       "name": "stuff-unet",
       "kind": "cnn-semantic-segmenter",
       "path": "stuff_unet.pt",

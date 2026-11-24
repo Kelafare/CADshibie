@@ -75,6 +75,9 @@ def crop_instance(image, mask, box):
         return None
     crop = image[top:bottom, left:right]
     target = mask[top:bottom, left:right]
+    anchor = [cx / max(width, 1) * 100.0, cy / max(height, 1) * 100.0,
+              (x1 - x0) / max(width, 1) * 100.0,
+              (y1 - y0) / max(height, 1) * 100.0]
     # gt_segment_masks 返回 0/1；先放大到 0/255，再缩放，避免细线被 AREA 取整成 0。
     target = (target.astype(np.uint8) * 255)
     if NATIVE:
@@ -92,10 +95,10 @@ def crop_instance(image, mask, box):
         canvas[:crop_h, :crop_w] = crop
         target_canvas = np.zeros((SIZE, SIZE), dtype=np.uint8)
         target_canvas[:crop_h, :crop_w] = target
-        return canvas, target_canvas
+        return canvas, target_canvas, anchor
     crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     target = cv2.resize(target, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-    return crop, target
+    return crop, target, anchor
 
 
 def sample_background(image, rng, attempts=24):
@@ -111,11 +114,12 @@ def sample_background(image, rng, attempts=24):
         crop = image[top:top + side, left:left + side]
         if float((crop.min(axis=2) < 245).mean()) > 0.01:
             continue
-        if NATIVE:
-            crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-            return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
+        anchor = [(left + side / 2.0) / max(width, 1) * 100.0,
+                  (top + side / 2.0) / max(height, 1) * 100.0,
+                  side / max(width, 1) * 100.0,
+                  side / max(height, 1) * 100.0]
         crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-        return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
+        return crop, np.zeros((SIZE, SIZE), dtype=np.uint8), anchor
     return None
 
 
@@ -141,9 +145,9 @@ def process(args):
         pair = crop_instance(image, mask, box)
         if pair is None:
             continue
-        crop, target = pair
+        crop, target, anchor = pair
         target = cv2.dilate(target, np.ones((3, 3), np.uint8), iterations=1)
-        out.append((semantic, crop, target))
+        out.append((semantic, crop, target, anchor))
     if negatives:
         rng = random.Random(stem)
         valid = [class_id for class_id in CLASSES if class_id < 30]
@@ -152,7 +156,7 @@ def process(args):
             if pair is None:
                 break
             class_id = rng.choice(valid) if valid else 0
-            out.append((class_id, pair[0], pair[1]))
+            out.append((class_id, pair[0], pair[1], pair[2]))
     return stem, out
 
 
@@ -198,7 +202,8 @@ def main():
             for p in pngs
             if os.path.exists(os.path.join(args.svg_dir, p[:-4] + ".svg"))]
     shard = 1500
-    buckets = {c: {"images": [], "masks": [], "part": 0} for c in CLASSES}
+    buckets = {c: {"images": [], "masks": [], "anchors": [], "part": 0}
+               for c in CLASSES}
 
     def flush(semantic, force=False):
         bucket = buckets[semantic]
@@ -210,19 +215,22 @@ def main():
             path,
             images=np.stack(bucket["images"]),
             masks=np.stack(bucket["masks"]),
+            anchors=np.asarray(bucket["anchors"], dtype=np.float32),
         )
         print(semantic, len(bucket["images"]), path, flush=True)
         bucket["images"] = []
         bucket["masks"] = []
+        bucket["anchors"] = []
         bucket["part"] += 1
 
     started = time.perf_counter()
     with Pool(args.workers, initializer=_init_worker,
               initargs=(args.size, CLASSES, args.native)) as pool:
         for index, (_stem, items) in enumerate(pool.imap_unordered(process, jobs, chunksize=8)):
-            for semantic, crop, target in items:
+            for semantic, crop, target, anchor in items:
                 buckets[semantic]["images"].append(crop)
                 buckets[semantic]["masks"].append(target)
+                buckets[semantic]["anchors"].append(anchor)
             for semantic in {item[0] for item in items}:
                 flush(semantic)
             if index % 200 == 0:

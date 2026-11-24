@@ -189,6 +189,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="hybrid 引擎中要求实例被 YOLO-seg 同类检测掩码支持的类别（逗号分隔，默认 8）",
     )
     parser.add_argument(
+        "--anchor-assign-classes", default="3,8,18,22,28",
+        help="B-lite 锚点整实例重归属的类别；空串关闭",
+    )
+    parser.add_argument(
+        "--anchor-assign-inside", type=float, default=0.6,
+        help="实例原子落入 YOLO 框的平均比例阈值",
+    )
+    parser.add_argument(
         "--hybrid-gate-threshold", type=float, default=0.1,
         help="实例级门控的最小重叠比例；无同类 YOLO 检测时该实例被丢弃",
     )
@@ -381,6 +389,8 @@ def _process_one(
     quality_rules=None,
     refiners=(),
     stuff_branch=None,
+    anchor_classes=frozenset(),
+    anchor_inside: float = 0.6,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -483,6 +493,14 @@ def _process_one(
             suppress=hybrid["suppress"],
             quality_rules=quality_rules,
         )
+        if anchor_classes and segdet_support:
+            detections = segdet_support.get("detections") or []
+            size = segdet_support.get("size") or (0, 0)
+            if detections and size[0] > 0 and size[1] > 0:
+                from cadvec.anchor_assign import reassign
+                data = reassign(data, detections, set(anchor_classes),
+                                int(size[1]), int(size[0]),
+                                inside=anchor_inside)
         if stuff_branch is not None:
             from cadvec.stuff_branch import append_stuff
             stuff_items = stuff_branch.infer(path)
@@ -867,6 +885,10 @@ def main(argv: list[str] | None = None) -> int:
                 quality_rules=quality_rules,
                 refiners=tuple(roi_plan),
                 stuff_branch=stuff_branch,
+                anchor_classes=frozenset(
+                    int(value) for value in args.anchor_assign_classes.split(",")
+                    if value.strip()),
+                anchor_inside=args.anchor_assign_inside,
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:

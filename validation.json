@@ -245,6 +245,30 @@
       "command": "python tools/train_yolo_ab.py --model yolov8n-seg.yaml|yolov8n-seg.pt --epochs 40 --device 0,1",
       "status": "passed",
       "detail": "同数据同增强：从零 mask mAP50=0.539/mAP50-95=0.309；COCO/ImageNet 初始化 0.753/0.520（+0.214/+0.211）。端到端：calib 25.714%/hold 22.830%/final 23.216%，相对现有默认 25.098/22.794/23.759，final 为负，故不替换默认；预训练仅作为基线要求保留"
+    },
+    {
+      "name": "e5_candidate_pool_oracle",
+      "command": "python tools/oracle_pool.py --gt-dir gt_calib --pred-dirs v2=... gat=... segdet=... hybrid=...",
+      "status": "passed",
+      "detail": "calib 300：oracle TP=658、FN=1319、无 FP 上界 PQ=34.73%；相对当前 hybrid 仅多约 50 TP，说明全局选择收益有限"
+    },
+    {
+      "name": "e4_atom_attribution_oracle",
+      "command": "python tools/oracle_atoms.py --gt-dir gt_calib --pred-dirs v2=... gat=... segdet=... hybrid=...",
+      "status": "passed",
+      "detail": "calib 300：GT 原子归属后 TP=915、FN=1062、无 FP 上界 PQ=44.53%；class 2 47.9%、class 3 36.3%、class 8 58.8%，说明归属/分组是主瓶颈"
+    },
+    {
+      "name": "e3_anchor_identity_prompt",
+      "command": "python tools/build_roi_ink.py ... && python tools/train_roi_ink.py ... --anchor --init roi_ink_512.pt",
+      "status": "passed",
+      "detail": "512 ROI 增加锚点中心/宽高条件，Dice 0.6959→0.7033；oracle class 3 24→45、class 2 76→85、class 29 3→12；端到端 calib 25.34→25.28（原门控）/25.09（重标定），未替换默认"
+    },
+    {
+      "name": "b_lite_anchor_assignment",
+      "command": "python infer.py ...（默认 --anchor-assign-classes 3,8,18,22,28）",
+      "status": "passed",
+      "detail": "整实例挂到同类 YOLO 锚点：全量 PQ 23.896→24.068%，SQ 68.112、RQ 35.336、TP/FP/FN=2158/2727/5171；calib 25.337%、hold 22.920%、final 23.849%；主要来自 class 8 去重（calib FP 269→178）"
     }
   ],
   "model": {

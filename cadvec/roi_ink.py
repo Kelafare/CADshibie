@@ -39,12 +39,20 @@ def _conv_block(in_channels: int, out_channels: int) -> nn.Sequential:
 
 
 class RoiInkUNet(nn.Module):
-    def __init__(self, classes: int = 36, base: int = 32, class_dim: int = 64):
+    def __init__(self, classes: int = 36, base: int = 32, class_dim: int = 64,
+                 use_anchor: bool = False):
         super().__init__()
+        self.use_anchor = bool(use_anchor)
         self.class_embed = nn.Sequential(
             nn.Linear(classes, class_dim), nn.SiLU(),
             nn.Linear(class_dim, base * 8),
         )
+        self.anchor_embed = None
+        if self.use_anchor:
+            self.anchor_embed = nn.Sequential(
+                nn.Linear(4, class_dim), nn.SiLU(),
+                nn.Linear(class_dim, base * 8),
+            )
         self.enc1 = _conv_block(3, base)
         self.enc2 = _conv_block(base, base * 2)
         self.enc3 = _conv_block(base * 2, base * 4)
@@ -58,13 +66,18 @@ class RoiInkUNet(nn.Module):
         self.dec1 = _conv_block(base * 2, base)
         self.head = nn.Conv2d(base, 1, 1)
 
-    def forward(self, image: torch.Tensor, class_onehot: torch.Tensor) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, class_onehot: torch.Tensor,
+                anchor: torch.Tensor | None = None) -> torch.Tensor:
         e1 = self.enc1(image)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
         e4 = self.enc4(self.pool(e3))
-        e4 = e4 + self.class_embed(class_onehot).view(
-            -1, e4.shape[1], 1, 1)
+        condition = self.class_embed(class_onehot)
+        if self.anchor_embed is not None:
+            if anchor is None:
+                anchor = torch.zeros((image.shape[0], 4), device=image.device)
+            condition = condition + self.anchor_embed(anchor)
+        e4 = e4 + condition.view(-1, e4.shape[1], 1, 1)
         d3 = self.dec3(torch.cat([self.up3(e4), e3], dim=1))
         d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
         d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
@@ -194,6 +207,7 @@ class RoiInkRefiner:
         self.crop_size = int(crop_size)
         self.quality_model = quality_model
         self.native_pad = bool(native_pad)
+        self.use_anchor = bool(getattr(model, "use_anchor", False))
         self.onehot = torch.eye(36, device=device)
 
     @classmethod
@@ -337,9 +351,23 @@ class RoiInkRefiner:
         batch = torch.from_numpy(np.stack(crops)).to(self.device)
         batch = batch.permute(0, 3, 1, 2).float() / 255.0
         class_ids = torch.tensor([item[0] for item in meta], device=self.device)
+        anchor_tensor = None
+        if self.use_anchor:
+            values = []
+            for item in meta:
+                _class_id, _conf, det_box = item[0], item[1], item[2]
+                x0, y0, x1, y1 = det_box
+                values.append([
+                    (x0 + x1) / 2.0 / max(width, 1),
+                    (y0 + y1) / 2.0 / max(height, 1),
+                    (x1 - x0) / max(width, 1),
+                    (y1 - y0) / max(height, 1),
+                ])
+            anchor_tensor = torch.tensor(values, dtype=torch.float32,
+                                         device=self.device)
         with torch.autocast(device_type="cuda" if self.device.type == "cuda" else "cpu",
                             dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
-            logits = self.model(batch, self.onehot[class_ids])
+            logits = self.model(batch, self.onehot[class_ids], anchor_tensor)
         probabilities = torch.sigmoid(logits.float())[:, 0].cpu().numpy()
         scale_x = width / max(canvas_width, 1)
         scale_y = height / max(canvas_height, 1)

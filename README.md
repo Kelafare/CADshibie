@@ -10,11 +10,11 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 23.896%**，SQ 68.843%，
-  RQ 34.711%，TP/FP/FN = 2162/2966/5167（hybrid + class 8 门控 +
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 24.068%**，SQ 68.112%，
+  RQ 35.336%，TP/FP/FN = 2158/2727/5171（hybrid + class 8 门控 +
   class2 专用/256 ROI 细化 + 512 统一类别条件 ROI 模型接管 3/4/22/26/29 +
-  全图 Stuff 语义分支接管 30/31/32/33/34 + 学习式与几何双重质量门控；
-  class 16/23 抑制）。
+  全图 Stuff 语义分支接管 30/31/32/33/34 + YOLO 锚点整实例重归属 +
+  学习式/几何质量门控；class 16/23 抑制）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
   （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
   + class 8 检测掩码门控 + ROI 实例墨迹细化 + 512 统一类别条件模型
@@ -184,6 +184,8 @@ python infer.py --input /data/dev_final --output /results \
 | `--stuff-weights PATH` | 全图 Stuff 语义分支权重，默认 `weights/stuff_unet.pt`；缺失则关闭 |
 | `--stuff-thresholds PATH` | Stuff 逐类概率阈值/最小面积，默认 `weights/stuff_thresholds.json` |
 | `--stuff-device auto/cuda/cpu` | Stuff 分支设备，默认自动 CUDA |
+| `--anchor-assign-classes 3,8,18,22,28` | B-lite 锚点整实例重归属类别；空串关闭 |
+| `--anchor-assign-inside 0.6` | 实例原子平均落入 YOLO 框的比例阈值 |
 
 ## 4. 方法（3 页内说明）
 
@@ -373,7 +375,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid + 512 统一模型 + 全图 Stuff 分支 + 精度再平衡（当前默认，最终）** | **23.896%** | 68.843% | 34.711% | 2162 / 2966 / 5167 |
+| **hybrid + 512 + Stuff + 精度再平衡 + 锚点重归属（当前默认，最终）** | **24.068%** | 68.112% | 35.336% | 2158 / 2727 / 5171 |
+| hybrid + 512 + Stuff + 精度再平衡 | 23.896% | 68.843% | 34.711% | 2162 / 2966 / 5167 |
 | hybrid + 512 统一模型 + 全图 Stuff 分支 | 23.313% | 68.766% | 33.902% | 2158 / 3244 / 5171 |
 | hybrid + 512 统一模型接管 3/4/26/29 | 22.696% | 68.733% | 33.020% | 2038 / 2977 / 5291 |
 | hybrid + 统一类别 ROI 接管 class 26（上一版） | 18.768% | 68.754% | 27.298% | 1687 / 3344 / 5642 |
@@ -391,8 +394,8 @@ python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/ro
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
 泛化校验（R1 感知哈希分组划分，test_final 300/300/400）：calib
-**25.098%**（基线 19.202%）、hold **22.794%**（基线 16.727%）、从未参与任何选择
-的 final **23.759%**（基线 18.508%），三个子集同向。上一版按旧 500/500
+**25.337%**（基线 19.202%）、hold **22.920%**（基线 16.727%）、从未参与任何选择
+的 final **23.849%**（基线 18.508%），三个子集同向。上一版按旧 500/500
 随机划分的 18.403% / 18.069% 仅作参考。完整消融见 `OPTIMIZATION.md`
 第 7、11、14、15、16、17 节，文献与路线见 `RESEARCH_PLAN.md`。
 

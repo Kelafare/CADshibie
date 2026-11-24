@@ -235,6 +235,7 @@ def run_image_segdet(
                            iou=det_iou, verbose=False, device=device,
                            retina_masks=False)[0]
     detections = []
+    detection_records = []
     support_polygons: dict[int, list[list[list[float]]]] = {}
     if result.masks is not None and result.boxes is not None and len(result.masks):
         classes = result.boxes.cls.cpu().numpy().astype(int)
@@ -246,6 +247,14 @@ def run_image_segdet(
             mask = np.zeros((height, width), dtype=np.uint8)
             cv2.fillPoly(mask, [np.round(polygon).astype(np.int32)], 1)
             detections.append((float(confidence), int(class_id), mask.astype(bool)))
+            ys, xs = np.nonzero(mask)
+            if len(xs):
+                detection_records.append({
+                    "class": int(class_id),
+                    "conf": float(confidence),
+                    "box": [float(xs.min()), float(ys.min()),
+                            float(xs.max()), float(ys.max())],
+                })
             if int(class_id) in support_classes:
                 support_polygons.setdefault(int(class_id), []).append(
                     np.round(np.asarray(polygon, dtype=np.float64), 1).tolist()
@@ -392,6 +401,7 @@ def run_image_segdet(
         "support": {
             "size": [height, width],
             "polygons": support_polygons,
+            "detections": detection_records,
         },
         "stats": {
             "primitive_count": len(emitted),

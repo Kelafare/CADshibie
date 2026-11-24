@@ -179,6 +179,15 @@
         "size_bytes": 22520
       },
       {
+        "name": "anchor-assign",
+        "kind": "decision-policy",
+        "path": "anchor_assign.json",
+        "parameters": 0,
+        "parameter_source": "manifest",
+        "exists": true,
+        "size_bytes": 197
+      },
+      {
         "name": "stuff-unet",
         "kind": "cnn-semantic-segmenter",
         "path": "stuff_unet.pt",
