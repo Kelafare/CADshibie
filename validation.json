@@ -275,6 +275,12 @@
       "command": "python tools/build_anchor_affinity.py ... && python tools/train_anchor_affinity.py ... && python infer.py ... --anchor-affinity-model ...",
       "status": "passed",
       "detail": "75,950 对、12 维特征、共享逻辑回归；calib 25.263%，低于规则版 25.337%，原因是 bbox_iou 在 GT 组上完美分离、推理分布不同；默认仍用规则版，亲和力保留为实验"
+    },
+    {
+      "name": "sift_anchor_probe",
+      "command": "python tools/sift_probe.py ... && python tools/sift_self_template.py ... --dump ... && python tools/sift_merge.py ...",
+      "status": "passed",
+      "detail": "跨图 GT 模板 SIFT 0 TP；同图自模板在 calib 300 上 class 3 召回 71.4%/精度 86.4%、class 22 53.1%/90.8%、class 28 58.9%/96.6%，但接入 512 ROI 后新增实例 0，calib 仍 25.337%，故不进入默认"
     }
   ],
   "model": {
