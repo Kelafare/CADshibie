@@ -269,6 +269,12 @@
       "command": "python infer.py ...（默认 --anchor-assign-classes 3,8,18,22,28）",
       "status": "passed",
       "detail": "整实例挂到同类 YOLO 锚点：全量 PQ 23.896→24.068%，SQ 68.112、RQ 35.336、TP/FP/FN=2158/2727/5171；calib 25.337%、hold 22.920%、final 23.849%；主要来自 class 8 去重（calib FP 269→178）"
+    },
+    {
+      "name": "learned_atom_anchor_affinity",
+      "command": "python tools/build_anchor_affinity.py ... && python tools/train_anchor_affinity.py ... && python infer.py ... --anchor-affinity-model ...",
+      "status": "passed",
+      "detail": "75,950 对、12 维特征、共享逻辑回归；calib 25.263%，低于规则版 25.337%，原因是 bbox_iou 在 GT 组上完美分离、推理分布不同；默认仍用规则版，亲和力保留为实验"
     }
   ],
   "model": {

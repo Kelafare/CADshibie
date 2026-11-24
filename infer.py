@@ -197,6 +197,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="实例原子落入 YOLO 框的平均比例阈值",
     )
     parser.add_argument(
+        "--anchor-affinity-model", default=str(SCRIPT_DIR / "weights" / "anchor_affinity.json"),
+        help="学习式 atom-anchor 亲和力 JSON；不存在则回退硬阈值",
+    )
+    parser.add_argument(
         "--hybrid-gate-threshold", type=float, default=0.1,
         help="实例级门控的最小重叠比例；无同类 YOLO 检测时该实例被丢弃",
     )
@@ -391,6 +395,7 @@ def _process_one(
     stuff_branch=None,
     anchor_classes=frozenset(),
     anchor_inside: float = 0.6,
+    anchor_affinity=None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -500,7 +505,8 @@ def _process_one(
                 from cadvec.anchor_assign import reassign
                 data = reassign(data, detections, set(anchor_classes),
                                 int(size[1]), int(size[0]),
-                                inside=anchor_inside)
+                                inside=anchor_inside,
+                                affinity=anchor_affinity)
         if stuff_branch is not None:
             from cadvec.stuff_branch import append_stuff
             stuff_items = stuff_branch.infer(path)
@@ -834,6 +840,14 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in (payload.get("rules") or {}).items():
             if isinstance(value, (list, tuple)) and len(value) == 3:
                 quality_rules[int(key)] = (str(value[0]), str(value[1]), float(value[2]))
+    anchor_affinity = None
+    if (args.anchor_assign_classes.strip()
+            and Path(args.anchor_affinity_model).exists()):
+        try:
+            anchor_affinity = json.loads(
+                Path(args.anchor_affinity_model).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            anchor_affinity = None
     stuff_branch = None
     if args.engine == "hybrid" and Path(args.stuff_weights).exists():
         from cadvec.stuff_branch import StuffBranch
@@ -889,6 +903,7 @@ def main(argv: list[str] | None = None) -> int:
                     int(value) for value in args.anchor_assign_classes.split(",")
                     if value.strip()),
                 anchor_inside=args.anchor_assign_inside,
+                anchor_affinity=anchor_affinity,
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:
