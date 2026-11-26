@@ -58,7 +58,7 @@
       "name": "model_parameter_audit",
       "command": "python infer.py --check-only",
       "status": "passed",
-      "detail": "总参数量 19,198,445（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 五套 ROI 墨迹 U-Net 各 1,948,847），上限 5,000,000,000"
+      "detail": "总参数量 23,077,263（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 + Stuff U-Net 1,929,971），上限 5,000,000,000"
     },
     {
       "name": "vit_training",
@@ -197,6 +197,102 @@
       "command": "python infer.py --input test_final --output pred --engine hybrid && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
       "status": "passed",
       "detail": "统一模型接管 class 26：PQ=18.768%, SQ=68.754%, RQ=27.298%, TP/FP/FN=1687/3344/5642；class 26 TP 32→72、FP 108→44、FN 101→61；calib 19.765%、hold 17.446%、final 18.911%（基线 19.202/16.727/18.508）；1000 张 0 错误"
+    },
+    {
+      "name": "r3_geom_roundtrip",
+      "command": "python tools/geom_roundtrip.py --gt-dir gt_json --limit 100 --per-class 3 --crop-sizes 192,256,384,512 --chunks 6,12",
+      "status": "passed",
+      "detail": "497 个真实 GT 实例严格命中率：192=47.4%、256=74.0%、384=80.3%、512=86.3%、原分辨率=100%；证明几何损失主要来自 ROI 分辨率而非四点重采样"
+    },
+    {
+      "name": "r3_512_roi_training",
+      "command": "python tools/build_roi_ink.py ... --size 512 && python tools/train_roi_ink.py ... --size 512 --epochs 10 --init weights/roi_ink_unified.pt",
+      "status": "passed",
+      "detail": "512×512 统一类别条件模型，15,262 训练样本；A30 bf16 10 轮；验证 Dice 0.696/IoU 0.534；oracle 严格命中 class 3 24→42、class 8 58→70、class 29 3→11"
+    },
+    {
+      "name": "r3_local_test_final_eval",
+      "command": "python infer.py --input test_final --output pred --engine hybrid && python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred --raster-size 1000",
+      "status": "passed",
+      "detail": "512 模型接管 class 3/4/26/29 + 质量门控来源键修复：PQ=22.696%, SQ=68.733%, RQ=33.020%, TP/FP/FN=2038/2977/5291；calib 24.099%、hold 21.246%、final 22.660%（基线 19.202/16.727/18.508）；1000 张 0 错误"
+    },
+    {
+      "name": "stuff_branch_feasibility",
+      "command": "python tools/build_stuff_tiles.py ... && python tools/train_stuff_unet.py ... --epochs 40 && python tools/eval_stuff_unet.py ...",
+      "status": "passed",
+      "detail": "100 张训练/20 张留出；512 分块、5 类；原始/矢量严格 IoU：c30 0.517/0.386、c32 0.627/0.564（58% 命中）、c34 0.645/0.577（88% 命中）"
+    },
+    {
+      "name": "stuff_branch_production",
+      "command": "python tools/train_stuff_unet.py --shards train_tiles --epochs 40 --gpus all && python tools/tune_stuff_thresholds.py ... && python infer.py ... --stuff-weights weights/stuff_unet.pt",
+      "status": "passed",
+      "detail": "train_final 1,598 张/14,382 块，双 A30 DataParallel，best val mIoU 0.333；calib 全图阈值/面积标定；全量 PQ=23.313%, SQ=68.766%, RQ=33.902%, TP/FP/FN=2158/3244/5171；calib 24.707%、hold 22.130%、final 23.105%；Stuff TP +120，Thing 不变；1000 张中 1 张瞬时 OOM 已单图重跑"
+    },
+    {
+      "name": "step1_precision_rebalance",
+      "command": "python infer.py ... --roi-ink-aux-classes 3,4,26,29,22 --suppress-classes 2,11,14,17,18,21,22,30,34,16,23 --roi-quality-model weights/roi_quality_512c_all.json",
+      "status": "passed",
+      "detail": "512 扩 class 22（FP 41→23，TP 不变）+ 抑制 16/23（TP 3、FP 182）：全量 PQ=23.896%, SQ=68.843%, RQ=34.711%, TP/FP/FN=2162/2966/5167；calib 25.098%、hold 22.794%、final 23.759%；class 8 门控后移实验无收益已回退"
+    },
+    {
+      "name": "detail_head_feasibility",
+      "command": "python tools/build_detail_roi.py ... && python tools/train_detail_unet.py ... && python tools/eval_detail_unet.py ...",
+      "status": "passed",
+      "detail": "100 张/646 实例、384 native 补白、30 轮；20 张留出矢量 IoU coarse 0.453→detail 0.480，命中率 47%；class 2/4/8 有提升但幅度不足以证明端到端 PQ，未接入默认"
+    },
+    {
+      "name": "yolo_pretraining_ab",
+      "command": "python tools/train_yolo_ab.py --model yolov8n-seg.yaml|yolov8n-seg.pt --epochs 40 --device 0,1",
+      "status": "passed",
+      "detail": "同数据同增强：从零 mask mAP50=0.539/mAP50-95=0.309；COCO/ImageNet 初始化 0.753/0.520（+0.214/+0.211）。端到端：calib 25.714%/hold 22.830%/final 23.216%，相对现有默认 25.098/22.794/23.759，final 为负，故不替换默认；预训练仅作为基线要求保留"
+    },
+    {
+      "name": "e5_candidate_pool_oracle",
+      "command": "python tools/oracle_pool.py --gt-dir gt_calib --pred-dirs v2=... gat=... segdet=... hybrid=...",
+      "status": "passed",
+      "detail": "calib 300：oracle TP=658、FN=1319、无 FP 上界 PQ=34.73%；相对当前 hybrid 仅多约 50 TP，说明全局选择收益有限"
+    },
+    {
+      "name": "e4_atom_attribution_oracle",
+      "command": "python tools/oracle_atoms.py --gt-dir gt_calib --pred-dirs v2=... gat=... segdet=... hybrid=...",
+      "status": "passed",
+      "detail": "calib 300：GT 原子归属后 TP=915、FN=1062、无 FP 上界 PQ=44.53%；class 2 47.9%、class 3 36.3%、class 8 58.8%，说明归属/分组是主瓶颈"
+    },
+    {
+      "name": "e3_anchor_identity_prompt",
+      "command": "python tools/build_roi_ink.py ... && python tools/train_roi_ink.py ... --anchor --init roi_ink_512.pt",
+      "status": "passed",
+      "detail": "512 ROI 增加锚点中心/宽高条件，Dice 0.6959→0.7033；oracle class 3 24→45、class 2 76→85、class 29 3→12；端到端 calib 25.34→25.28（原门控）/25.09（重标定），未替换默认"
+    },
+    {
+      "name": "b_lite_anchor_assignment",
+      "command": "python infer.py ...（默认 --anchor-assign-classes 3,8,18,22,28）",
+      "status": "passed",
+      "detail": "整实例挂到同类 YOLO 锚点：全量 PQ 23.896→24.068%，SQ 68.112、RQ 35.336、TP/FP/FN=2158/2727/5171；calib 25.337%、hold 22.920%、final 23.849%；主要来自 class 8 去重（calib FP 269→178）"
+    },
+    {
+      "name": "learned_atom_anchor_affinity",
+      "command": "python tools/build_anchor_affinity.py ... && python tools/train_anchor_affinity.py ... && python infer.py ... --anchor-affinity-model ...",
+      "status": "passed",
+      "detail": "75,950 对、12 维特征、共享逻辑回归；calib 25.263%，低于规则版 25.337%，原因是 bbox_iou 在 GT 组上完美分离、推理分布不同；默认仍用规则版，亲和力保留为实验"
+    },
+    {
+      "name": "sift_anchor_probe",
+      "command": "python tools/sift_probe.py ... && python tools/sift_self_template.py ... --dump ... && python tools/sift_merge.py ...",
+      "status": "passed",
+      "detail": "跨图 GT 模板 SIFT 0 TP；同图自模板在 calib 300 上 class 3 召回 71.4%/精度 86.4%、class 22 53.1%/90.8%、class 28 58.9%/96.6%，但接入 512 ROI 后新增实例 0，calib 仍 25.337%，故不进入默认"
+    },
+    {
+      "name": "sift_rerank_probe",
+      "command": "python tools/sift_rerank.py --gt-dir gt_calib --pred-dir aint_calib --sift-jsonl sift_calib.jsonl",
+      "status": "passed",
+      "detail": "5 类 Thing PQ 24.018→24.041%（+0.023），class 3/22 TP 分数略高、class 8/18/28 方向相反或重叠；会丢 2 TP，分数不足以做可靠门控，不采纳"
+    },
+    {
+      "name": "atom_level_anchor_assignment",
+      "command": "python tools/build_atom_affinity.py ... && python tools/train_atom_affinity.py ... && python infer.py ... --atom-assign-classes 3,28",
+      "status": "passed",
+      "detail": "43.7 万对、12 维特征、共享逻辑回归；calib 25.337→25.819%（class 3 TP 59→70、class 28 27→30）；全量 PQ 24.068→24.348%，SQ 68.137、RQ 35.734、TP/FP/FN=2186/2720/5143；hold 23.168%、final 24.083%"
     }
   ],
   "model": {
@@ -213,9 +309,15 @@
     "roi_ink_quality": "weights/roi_ink_quality.json，逐类几何质量门限（0 参数）",
     "roi_ink_refiner_256": "weights/roi_ink_256.pt，1,948,847 个张量元素，256×256 ROI 墨迹 U-Net（13 类、1500/类、20 轮，Dice 0.801）；负责 class 8/12/14/15/18/19/20/21/22/25/27/28",
     "roi_ink_refiner_c2": "weights/roi_ink_c2.pt，1,948,847 个张量元素，class 2 专用 192×192 U-Net（30 轮，Dice 0.815）",
-    "roi_ink_refiner_unified": "weights/roi_ink_unified.pt，1,948,847 个张量元素，统一类别条件 256×256 U-Net（30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，Dice 0.760）；默认接管 class 26",
+    "roi_ink_refiner_unified": "weights/roi_ink_unified.pt，1,948,847 个张量元素，统一类别条件 256×256 U-Net（30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，Dice 0.760）",
+    "roi_ink_refiner_512": "weights/roi_ink_512.pt，1,948,847 个张量元素，512×512 统一类别条件 U-Net（从 256 微调 10 轮，Dice 0.696）；默认接管 class 3/4/26/29",
     "roi_quality": "weights/roi_quality.json，旧版学习式逐类质量门控（0 参数）",
-    "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 统一模型 class 26 的学习式质量门控（0 参数）",
+    "roi_quality_all": "weights/roi_quality_all.json，旧 13 类 + 256 模型 class 26 的质量门控（0 参数）",
+    "roi_quality_512_all": "weights/roi_quality_512_all.json，旧 13 类 + class 3/4/26/29 的质量门控（0 参数）",
+    "roi_quality_512c_all": "weights/roi_quality_512c_all.json，默认质量门控（512 扩 class 22，calib 重标定，0 参数）",
+    "stuff_unet": "weights/stuff_unet.pt，1,929,971 个张量元素，全图 Stuff 语义 U-Net（30–34，512 分块，best val mIoU 0.333）",
+    "stuff_thresholds": "weights/stuff_thresholds.json，Stuff 逐类概率阈值与最小面积（0 参数）",
+    "atom_affinity": "weights/atom_affinity.json，原子级 atom-anchor 亲和力（12 维几何特征、共享逻辑回归，0 参数）",
     "label_qa": "weights/label_qa.json，GT 在 300/400/1000px 栅格下的稳定性统计（0 参数）"
   },
   "synthetic_pq_diagnostic": {

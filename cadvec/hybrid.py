@@ -270,9 +270,11 @@ def merge_final(
     # 主引擎与细化实例，直接裁剪输出以降低 FP。
     if quality_rules:
         features: dict[tuple[int, int], dict[str, float]] = {}
-        grouped: dict[tuple[int, int], list[dict]] = {}
+        grouped: dict[tuple, list[dict]] = {}
         for item in items:
-            key = (item["semantic"], item["key"][1])
+            # 质量门控必须按完整来源键分组；只按 instance id 会把主引擎与
+            # ROI 中恰好同号的实例拼在一起，导致密度/长度被稀释而误删。
+            key = (item["semantic"], item["key"])
             grouped.setdefault(key, []).append(item)
         for key, group in grouped.items():
             xs = [point[0] for item in group for point in item["points"]]

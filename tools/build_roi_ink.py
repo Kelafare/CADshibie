@@ -25,12 +25,14 @@ from PIL import Image, ImageDraw  # noqa: E402
 SIZE = 192
 PAD = 0.30
 CLASSES = tuple(range(2, 30))
+NATIVE = False
 
 
-def _init_worker(size: int, classes) -> None:
-    global SIZE, CLASSES
+def _init_worker(size: int, classes, native: bool = False) -> None:
+    global SIZE, CLASSES, NATIVE
     SIZE = int(size)
     CLASSES = tuple(classes)
+    NATIVE = bool(native)
 
 
 def render_instances(primitives, raster=1000):
@@ -73,11 +75,30 @@ def crop_instance(image, mask, box):
         return None
     crop = image[top:bottom, left:right]
     target = mask[top:bottom, left:right]
+    anchor = [cx / max(width, 1) * 100.0, cy / max(height, 1) * 100.0,
+              (x1 - x0) / max(width, 1) * 100.0,
+              (y1 - y0) / max(height, 1) * 100.0]
     # gt_segment_masks 返回 0/1；先放大到 0/255，再缩放，避免细线被 AREA 取整成 0。
     target = (target.astype(np.uint8) * 255)
+    if NATIVE:
+        crop_h, crop_w = crop.shape[:2]
+        if crop_w > SIZE or crop_h > SIZE:
+            scale = min(SIZE / crop_w, SIZE / crop_h)
+            resized_w = max(1, int(round(crop_w * scale)))
+            resized_h = max(1, int(round(crop_h * scale)))
+            crop = cv2.resize(crop, (resized_w, resized_h),
+                              interpolation=cv2.INTER_AREA)
+            target = cv2.resize(target, (resized_w, resized_h),
+                                interpolation=cv2.INTER_AREA)
+            crop_h, crop_w = resized_h, resized_w
+        canvas = np.full((SIZE, SIZE, 3), 255, dtype=np.uint8)
+        canvas[:crop_h, :crop_w] = crop
+        target_canvas = np.zeros((SIZE, SIZE), dtype=np.uint8)
+        target_canvas[:crop_h, :crop_w] = target
+        return canvas, target_canvas, anchor
     crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
     target = cv2.resize(target, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-    return crop, target
+    return crop, target, anchor
 
 
 def sample_background(image, rng, attempts=24):
@@ -93,8 +114,12 @@ def sample_background(image, rng, attempts=24):
         crop = image[top:top + side, left:left + side]
         if float((crop.min(axis=2) < 245).mean()) > 0.01:
             continue
+        anchor = [(left + side / 2.0) / max(width, 1) * 100.0,
+                  (top + side / 2.0) / max(height, 1) * 100.0,
+                  side / max(width, 1) * 100.0,
+                  side / max(height, 1) * 100.0]
         crop = cv2.resize(crop, (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-        return crop, np.zeros((SIZE, SIZE), dtype=np.uint8)
+        return crop, np.zeros((SIZE, SIZE), dtype=np.uint8), anchor
     return None
 
 
@@ -120,9 +145,9 @@ def process(args):
         pair = crop_instance(image, mask, box)
         if pair is None:
             continue
-        crop, target = pair
+        crop, target, anchor = pair
         target = cv2.dilate(target, np.ones((3, 3), np.uint8), iterations=1)
-        out.append((semantic, crop, target))
+        out.append((semantic, crop, target, anchor))
     if negatives:
         rng = random.Random(stem)
         valid = [class_id for class_id in CLASSES if class_id < 30]
@@ -131,7 +156,7 @@ def process(args):
             if pair is None:
                 break
             class_id = rng.choice(valid) if valid else 0
-            out.append((class_id, pair[0], pair[1]))
+            out.append((class_id, pair[0], pair[1], pair[2]))
     return stem, out
 
 
@@ -151,7 +176,11 @@ def main():
                         help="只处理 train_final 中该角色的图片")
     parser.add_argument("--negatives", type=int, default=0,
                         help="每张训练图附加的空白负样本数（val 不加）")
+    parser.add_argument("--native", action="store_true",
+                        help="原分辨率模式：裁剪不缩放，左上角补白到 SIZE；"
+                             "超出 SIZE 的裁剪才等比缩小")
     args = parser.parse_args()
+    globals()["NATIVE"] = bool(args.native)
     if args.classes.strip():
         globals()["CLASSES"] = tuple(
             int(v) for v in args.classes.split(",") if v.strip())
@@ -173,7 +202,8 @@ def main():
             for p in pngs
             if os.path.exists(os.path.join(args.svg_dir, p[:-4] + ".svg"))]
     shard = 1500
-    buckets = {c: {"images": [], "masks": [], "part": 0} for c in CLASSES}
+    buckets = {c: {"images": [], "masks": [], "anchors": [], "part": 0}
+               for c in CLASSES}
 
     def flush(semantic, force=False):
         bucket = buckets[semantic]
@@ -185,19 +215,22 @@ def main():
             path,
             images=np.stack(bucket["images"]),
             masks=np.stack(bucket["masks"]),
+            anchors=np.asarray(bucket["anchors"], dtype=np.float32),
         )
         print(semantic, len(bucket["images"]), path, flush=True)
         bucket["images"] = []
         bucket["masks"] = []
+        bucket["anchors"] = []
         bucket["part"] += 1
 
     started = time.perf_counter()
     with Pool(args.workers, initializer=_init_worker,
-              initargs=(args.size, CLASSES)) as pool:
+              initargs=(args.size, CLASSES, args.native)) as pool:
         for index, (_stem, items) in enumerate(pool.imap_unordered(process, jobs, chunksize=8)):
-            for semantic, crop, target in items:
+            for semantic, crop, target, anchor in items:
                 buckets[semantic]["images"].append(crop)
                 buckets[semantic]["masks"].append(target)
+                buckets[semantic]["anchors"].append(anchor)
             for semantic in {item[0] for item in items}:
                 flush(semantic)
             if index % 200 == 0:

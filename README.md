@@ -10,13 +10,15 @@
 与赛题规则约束，且体积过大）。运行时请把数据放到 `../datasets/` 或通过
 `--input/--output` 指定路径。
 
-- 最终本地成绩（test_final 全量 1000 张）：**PQ 18.768%**，SQ 68.754%，
-  RQ 27.298%，TP/FP/FN = 1687/3344/5642（hybrid + class 8 门控 +
-  class2 专用/256 ROI 细化 + 统一类别条件 ROI 模型接管 class 26 +
-  学习式与几何双重质量门控）。
+- 最终本地成绩（test_final 全量 1000 张）：**PQ 24.348%**，SQ 68.137%，
+  RQ 35.734%，TP/FP/FN = 2186/2720/5143（hybrid + class 8 门控 +
+  class2 专用/256 ROI 细化 + 512 统一类别条件 ROI 模型接管 3/4/22/26/29 +
+  全图 Stuff 语义分支接管 30/31/32/33/34 + YOLO 锚点整实例重归属 +
+  原子级锚点归属（class 3/28）+ 学习式/几何质量门控；class 16/23 抑制）。
 - 默认推理：`python infer.py --input <dev_final目录> --output results`
   （hybrid 引擎：v3 像素管线 ∪ GAT class8 ∪ YOLO-seg 类别 + PQ 类别门控
-  + class 8 检测掩码门控 + ROI 实例墨迹细化 + 统一类别条件模型）。
+  + class 8 检测掩码门控 + ROI 实例墨迹细化 + 512 统一类别条件模型
+  + 全图 Stuff 语义分支）。
 - 方法、消融和文献路线见 `METHOD.md`、`OPTIMIZATION.md`、`RESEARCH_PLAN.md`。
 - 依赖：`pip install -r requirements.txt`（GPU 可选，自动回退 CPU）。
 - 离线合规：`python tools/check_compliance.py`。
@@ -173,12 +175,19 @@ python infer.py --input /data/dev_final --output /results \
 | `--hybrid-gate-metric cover/iou` | 重叠度量：`cover`=交集/较小面积（默认），`iou`=标准 IoU |
 | `--roi-ink-weights PATH` | ROI 实例墨迹细化权重，默认 `weights/roi_ink_c2.pt`；缺失则关闭 |
 | `--roi-ink-classes 2` | 主 ROI 权重（class 2 专用 192 模型）负责的类别 |
-| `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,22,25,27,28` | 256 ROI 权重负责的类别 |
+| `--roi-ink-extra-classes 8,12,14,15,18,19,20,21,25,27,28` | 256 ROI 权重负责的类别 |
 | `--roi-ink-device auto/cuda/cpu` | 细化器设备，默认自动 CUDA |
 | `--roi-ink-quality PATH` | 细化实例几何质量门限 JSON，默认 `weights/roi_ink_quality.json`；缺失则不过滤 |
-| `--roi-ink-weights-aux PATH` | 统一类别条件 ROI 权重，默认 `weights/roi_ink_unified.pt` |
-| `--roi-ink-aux-classes 26` | 统一类别模型默认负责的类别（可扩到 `0..29`） |
-| `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_all.json` |
+| `--roi-ink-weights-aux PATH` | 512 统一类别条件 ROI 权重，默认 `weights/roi_ink_512.pt` |
+| `--roi-ink-aux-classes 3,4,22,26,29` | 512 统一类别模型默认负责的类别（可扩到 `0..29`） |
+| `--roi-quality-model PATH` | 学习式实例质量门控，默认 `weights/roi_quality_512c_all.json` |
+| `--stuff-weights PATH` | 全图 Stuff 语义分支权重，默认 `weights/stuff_unet.pt`；缺失则关闭 |
+| `--stuff-thresholds PATH` | Stuff 逐类概率阈值/最小面积，默认 `weights/stuff_thresholds.json` |
+| `--stuff-device auto/cuda/cpu` | Stuff 分支设备，默认自动 CUDA |
+| `--anchor-assign-classes 3,8,18,22,28` | B-lite 锚点整实例重归属类别；空串关闭 |
+| `--anchor-assign-inside 0.6` | 实例原子平均落入 YOLO 框的比例阈值 |
+| `--atom-assign-classes 3,28` | B-lite v3 原子级锚点归属类别；空串关闭 |
+| `--atom-affinity-model PATH` | 原子级亲和力 JSON，默认 `weights/atom_affinity.json` |
 
 ## 4. 方法（3 页内说明）
 
@@ -219,10 +228,10 @@ v2 引擎（默认）分五步，详细说明见 `METHOD.md`：
 | 规则要求 | 本提交的做法 |
 |---|---|
 | 64 位 Linux、离线运行 | `Dockerfile` 基于 `python:3.13-slim`；`infer.py` 启动即安装 socket 防护；`manifest` 声明 `external_network_required=false`；无外部 API |
-| 模型参数总量 ≤ 5B | 审计总量 19,198,445（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 五套 ROI 墨迹 U-Net 各 1,948,847）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
+| 模型参数总量 ≤ 5B | 审计总量 23,077,263（ViT 2,911,525 + YOLO-seg 3,399,033 + GAT 356,373 + ResNet18 主干 2,787,279 + 六套 ROI 墨迹 U-Net 各 1,948,847 + Stuff U-Net 1,929,971）；见 `weights/manifest.json`；`compliance/params.py` 启动审计 |
 | 容器、启动命令、依赖版本、模型清单 | `Dockerfile`、`run.sh`、`requirements.txt`、`weights/manifest.json`、`environment.json` |
 | 验证 JSON | `validation.json` 记录输出契约、测试/自检结果；`infer.py` 输出逐图 JSON 并由 `validate_output` 校验 |
-| 仅使用主办方数据 | 只使用 `train_final`/`test_final` 的 SVG 构建先验与可选分类器，`dev_final` 只读 PNG；未使用任何外部数据 |
+| 数据与开源权重 | 训练/校准只使用主办方 `train_final`/`test_final`；使用公开开源预训练权重：torchvision ResNet18（ImageNet1K）作 GAT 特征主干，YOLOv8n-seg 的 COCO/ImageNet 初始化仅用于 A/B 实验并在 `OPTIMIZATION.md` §20 声明；未使用私有数据集；`dev_final` 只读 PNG |
 | 禁止测试真值/答案查找 | `infer.py` 只 glob `*.png`，不导入 `cadvec.svg`；无按文件名/ID 的硬编码映射；`tools/check_compliance.py` 会扫描并阻断 |
 | 结果可复现 | 固定依赖版本、固定种子、确定性流程；单图输出与线程数无关 |
 
@@ -312,9 +321,13 @@ python -m cadvec.evaluate --gt-dir gt_json --pred-dir pred_json --raster-size 10
 - `yolo_seg.pt` / `gat_primitive.pt` / `resnet18_layer3.pt`：hybrid 的实例分割、图元 GAT 与图像特征主干；
 - `roi_ink_c2.pt` / `roi_ink_256.pt`：ROI 实例墨迹 U-Net（各 1.95M 参数）；
   默认 class 2 专用模型负责 class 2，256 模型负责 8/12/14/15/18/19/20/21/22/25/27/28；
-- `roi_ink_unified.pt`：统一类别条件 256 ROI 墨迹 U-Net（30 个 Thing 类，1.95M 参数），
-  默认接管 class 26（全量 1000 张 +0.533 PQ）；
-- `roi_quality_all.json`：学习式 ROI 实例质量门控（旧 13 类 + class 26）；
+- `roi_ink_512.pt`：512 统一类别条件 ROI 墨迹 U-Net（30 个 Thing 类，1.95M 参数），
+  默认接管 class 3/4/26/29；
+- `stuff_unet.pt`：全图 Stuff 语义 U-Net（30–34，1.93M 参数），512 分块推理；
+  全量 1000 张相对 22.696% 提升到 **23.313%**；
+- `roi_ink_unified.pt`：256 统一类别模型（保留用于消融与 512 微调起点）；
+- `roi_quality_512_all.json`：默认学习式质量门控（旧 13 类 + class 3/4/26/29）；
+- `roi_quality_all.json`：256 模型版本的质量门控（保留用于消融）；
 - `label_qa.json`：GT 在 300/400/1000px 栅格下的稳定性诊断；
 - `roi_ink.pt` / `roi_ink_all.pt` / `roi_quality.json` 保留用于消融；
 - `color_prior.json`：v1 颜色查找表（0 参数，保留兼容）。
@@ -346,6 +359,15 @@ python tools/build_roi_ink.py --png-dir /data/train_final --svg-dir /data/train_
 python tools/train_roi_ink.py --shards _work/roi_unified/train \
   --val-shards _work/roi_unified/val --classes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 \
   --cap 1500 --size 256 --epochs 24 --out weights/roi_ink_unified.pt
+
+# R3 512 等比缩放模型（几何往返显示 256→512 命中率 74%→86%）
+python tools/build_roi_ink.py --png-dir /data/train_final --svg-dir /data/train_final \
+  --out _work/roi_512/train --size 512 --classes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 \
+  --split-file weights/splits.json --split-role train --negatives 1 --workers 32
+python tools/train_roi_ink.py --shards _work/roi_512/train --val-shards _work/roi_512/val \
+  --classes 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29 \
+  --cap 800 --size 512 --epochs 10 --lr 0.0004 --init _work/roi_ink_unified.pt \
+  --out weights/roi_ink_512.pt
 ```
 
 训练标签与评估口径对齐：Thing（0-29）且 `instance-id=-1` 的图元评测时会整条
@@ -355,8 +377,13 @@ python tools/train_roi_ink.py --shards _work/roi_unified/train \
 
 | 引擎 | PQ | SQ | RQ | TP / FP / FN |
 |---|---:|---:|---:|---:|
-| **hybrid + 统一类别 ROI 接管 class 26（当前默认，最终）** | **18.768%** | 68.754% | 27.298% | 1687 / 3344 / 5642 |
-| hybrid + class2 专用/256 + 学习式质量门控（上一版） | 18.235% | 68.557% | 26.598% | 1648 / 3415 / 5681 |
+| **hybrid + 512 + Stuff + 锚点重归属 + 原子级归属（当前默认，最终）** | **24.348%** | 68.137% | 35.734% | 2186 / 2720 / 5143 |
+| hybrid + 512 + Stuff + 精度再平衡 + 锚点重归属 | 24.068% | 68.112% | 35.336% | 2158 / 2727 / 5171 |
+| hybrid + 512 + Stuff + 精度再平衡 | 23.896% | 68.843% | 34.711% | 2162 / 2966 / 5167 |
+| hybrid + 512 统一模型 + 全图 Stuff 分支 | 23.313% | 68.766% | 33.902% | 2158 / 3244 / 5171 |
+| hybrid + 512 统一模型接管 3/4/26/29 | 22.696% | 68.733% | 33.020% | 2038 / 2977 / 5291 |
+| hybrid + 统一类别 ROI 接管 class 26（上一版） | 18.768% | 68.754% | 27.298% | 1687 / 3344 / 5642 |
+| hybrid + class2 专用/256 + 学习式质量门控 | 18.235% | 68.557% | 26.598% | 1648 / 3415 / 5681 |
 | hybrid + 192/256 路由细化 + 几何门控 | 16.250% | 67.426% | 24.101% | 1591 / 4283 / 5738 |
 | hybrid + 双模型（192）细化 + 质量门控 | 13.995% | 65.891% | 21.239% | 1392 / 4387 / 5937 |
 | hybrid + 单模型 ROI 细化 | 11.804% | 66.240% | 17.820% | 1318 / 6145 / 6011 |
@@ -370,10 +397,10 @@ python tools/train_roi_ink.py --shards _work/roi_unified/train \
 | v1（旧流程，同 1000 张） | 0.000% | 0.000% | 0.000% | 0 / 36767 / 7329 |
 
 泛化校验（R1 感知哈希分组划分，test_final 300/300/400）：calib
-19.765%（基线 19.202%）、hold **17.446%**（基线 16.727%）、从未参与任何选择
-的 final **18.911%**（基线 18.508%），三个子集同向。上一版按旧 500/500
+**25.819%**（基线 19.202%）、hold **23.168%**（基线 16.727%）、从未参与任何选择
+的 final **24.083%**（基线 18.508%），三个子集同向。上一版按旧 500/500
 随机划分的 18.403% / 18.069% 仅作参考。完整消融见 `OPTIMIZATION.md`
-第 7、11、14、15、16 节，文献与路线见 `RESEARCH_PLAN.md`。
+第 7、11、14、15、16、17 节，文献与路线见 `RESEARCH_PLAN.md`。
 
 补充诊断（前 60 张子集）：v2 PQ=1.186%（TP/FP/FN=11/556/431），v1 PQ=0；
 把 ViT 类别替换为真值的上界为 PQ=3.164%。该子集比全量更难，小样本波动大，

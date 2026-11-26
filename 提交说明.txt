@@ -58,9 +58,17 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
   13 类、1500/类、20 轮（Dice 0.801），负责 class 8/12/14/15/18/19/20/21/22/25/27/28。
 - weights/roi_ink_unified.pt：统一类别条件 256×256 ROI 墨迹 U-Net
   （1,948,847 个张量元素，30 个 Thing 类、21,284 实例 + 4,926 难负例、24 轮，
-  Dice 0.760），默认接管 class 26。
+  Dice 0.760），作为 512 模型的微调起点/消融保留。
+- weights/roi_ink_512.pt：512×512 统一类别条件 ROI 墨迹 U-Net
+  （1,948,847 个张量元素，从 256 微调 10 轮，Dice 0.696），默认接管
+  class 3/4/26/29；几何往返显示 512 裁剪严格命中率 86.3%（256 为 74.0%）。
 - weights/roi_quality.json：旧版学习式 ROI 实例质量门控（0 参数）。
-- weights/roi_quality_all.json：默认学习式质量门控（旧 13 类 + class 26，0 参数）。
+- weights/roi_quality_all.json：256 模型版本的学习式质量门控（0 参数）。
+- weights/roi_quality_512_all.json：默认质量门控（旧 13 类 + class 3/4/26/29，0 参数）。
+- weights/stuff_unet.pt：全图 Stuff 语义 U-Net（1,929,971 个张量元素），
+  30–34 五类、512 重叠分块；train_final 1,598 张含 Stuff 图纸训练，
+  best val mIoU 0.333。
+- weights/stuff_thresholds.json：Stuff 逐类概率阈值与最小面积（0 参数）。
 - weights/roi_ink_all.pt：28 类 ROI 墨迹 U-Net（1,948,847 个张量元素），
   作为可选消融权重保留（默认关闭）。
 - weights/roi_ink_quality.json：细化实例几何质量门限（0 参数）。
@@ -68,19 +76,22 @@ python infer.py --input <dev_final目录> --output results --engine hybrid --wor
 - 训练标签与评估口径对齐：Thing 且 instance-id=-1 的图元归入忽略类 35；
   对象假设按与 GT 实例的 IoU/覆盖率打标签。
 - dev_final 推理只读取 PNG，不读取任何 SVG 或真值。
+- 开源预训练声明：ResNet18（ImageNet1K，torchvision）作为 GAT 特征主干；
+  YOLO A/B 实验使用 COCO/ImageNet 初始化的 yolov8n-seg 权重，仅用于对照，
+  未进入默认提交权重；未使用任何私有数据集（赛题允许开源数据并声明）。
 
 五、复现与自检
 --------------
 python -m pytest tests -q                  # 56 passed
 python tools/check_compliance.py           # ok: true
-python infer.py --check-only               # 总参数 19,198,445 / 上限 5B
+python infer.py --check-only               # 总参数 23,077,263 / 上限 5B
 
 本地 test_final 全量 1000 张（参考口径 raster 1000、IoU>0.5）：
-hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 统一模型 class 26 + 学习式质量门控 + class8 门控）
-PQ 18.768%，SQ 68.754%，RQ 27.298%，TP/FP/FN = 1687/3344/5642；
-上一版（class2 专用/256）18.235%；更早 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
+hybrid（默认/推荐，--engine hybrid，class2 专用/256 + 512 统一模型接管 3/4/22/26/29 + 全图 Stuff 分支 30–34 + YOLO 锚点整实例重归属（3/8/18/22/28） + 原子级锚点归属（3/28） + 抑制 16/23 + 学习式质量门控 + class8 门控）
+PQ 24.348%，SQ 68.137%，RQ 35.734%，TP/FP/FN = 2186/2720/5143；
+上一版（+Stuff）23.313%；更早 22.696% / 18.768% / 18.235% / 16.250% / 13.995% / 11.804% / 2.893% / 2.597%；
 v3 1.884%；YOLO-seg 1.673%；GAT v2 1.627%；v2 起点 1.575%；v1 0。
-泛化校验（dHash 分组）：calib 300 19.765%、hold 300 17.446%、final 400 18.911%；
+泛化校验（dHash 分组）：calib 300 25.819%、hold 300 23.168%、final 400 24.083%；
 基线同划分为 19.202% / 16.727% / 18.508%。
 该结果仅用于本地链路诊断，不是官方 dev_final 成绩（官方真值不公开）。
 

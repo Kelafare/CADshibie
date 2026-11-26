@@ -20,16 +20,20 @@ SIZE = 192
 
 
 def load_class(shard_dir: str, class_id: int, cap: int):
-    images, masks = [], []
+    images, masks, anchors = [], [], []
     for path in sorted(glob.glob(os.path.join(shard_dir, f"roi_ink_c{class_id}_p*.npz"))):
         data = np.load(path)
         images.append(data["images"])
         masks.append(data["masks"])
+        if "anchors" in data:
+            anchors.append(data["anchors"])
     if not images:
-        return None, None
+        return None, None, None
     images = np.concatenate(images, axis=0)[:cap]
     masks = np.concatenate(masks, axis=0)[:cap]
-    return images, masks
+    anchor_array = (np.concatenate(anchors, axis=0)[:cap]
+                    if anchors else None)
+    return images, masks, anchor_array
 
 
 def main():
@@ -44,6 +48,8 @@ def main():
     parser.add_argument("--neg-cap", type=int, default=3000)
     parser.add_argument("--init", default=None,
                         help="从已有权重继续训练（fine-tune）")
+    parser.add_argument("--native", action="store_true",
+                        help="训练/保存原分辨率补白模式标记")
     parser.add_argument("--out", default="_work/roi_ink.pt")
     parser.add_argument("--classes", default=",".join(str(i) for i in range(2, 30)))
     parser.add_argument("--cap", type=int, default=1000)
@@ -52,6 +58,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--size", type=int, default=192)
+    parser.add_argument("--anchor", action="store_true",
+                        help="使用锚点几何（中心/宽高）作为身份提示")
     args = parser.parse_args()
     global SIZE
     SIZE = int(args.size)
@@ -62,45 +70,57 @@ def main():
     print("device", device, torch.cuda.get_device_name(0) if device.type == "cuda" else "",
           flush=True)
 
-    images, masks, labels = [], [], []
+    images, masks, labels, anchors = [], [], [], []
     for class_id in [int(v) for v in args.classes.split(",")]:
-        x, y = load_class(args.shards, class_id, args.cap)
+        x, y, a = load_class(args.shards, class_id, args.cap)
         if x is None:
             print("missing class", class_id, flush=True)
             continue
         images.append(x)
         masks.append(y)
         labels.append(np.full(len(x), class_id, dtype=np.int64))
+        anchors.append(a if a is not None
+                       else np.zeros((len(x), 4), dtype=np.float32))
         print("class", class_id, len(x), flush=True)
     images = np.concatenate(images)
     masks = np.concatenate(masks).astype(np.float32) / 255.0
     labels = np.concatenate(labels)
+    anchors = np.concatenate(anchors).astype(np.float32) / 100.0
     order = np.arange(len(images))
     np.random.shuffle(order)
     images, masks, labels = images[order], masks[order], labels[order]
+    anchors = anchors[order]
     if args.val_shards:
-        val_images, val_masks, val_labels = [], [], []
+        val_images, val_masks, val_labels, val_anchors = [], [], [], []
         for class_id in [int(v) for v in args.classes.split(",")]:
-            x, y = load_class(args.val_shards, class_id, args.val_cap)
+            x, y, a = load_class(args.val_shards, class_id, args.val_cap)
             if x is None:
                 continue
             val_images.append(x)
             val_masks.append(y)
             val_labels.append(np.full(len(x), class_id, dtype=np.int64))
+            val_anchors.append(a if a is not None
+                               else np.zeros((len(x), 4), dtype=np.float32))
         if val_images:
             val_x = np.concatenate(val_images)
             val_m = np.concatenate(val_masks).astype(np.float32) / 255.0
             val_c = np.concatenate(val_labels)
+            val_a = np.concatenate(val_anchors).astype(np.float32) / 100.0
             train_x, train_m, train_c = images, masks, labels
+            train_a = anchors
         else:
             print("val shards 为空，回退到 90/10 切分", flush=True)
             split = int(len(images) * 0.9)
             train_x, train_m, train_c = images[:split], masks[:split], labels[:split]
+            train_a = anchors[:split]
             val_x, val_m, val_c = images[split:], masks[split:], labels[split:]
+            val_a = anchors[split:]
     else:
         split = int(len(images) * 0.9)
         train_x, train_m, train_c = images[:split], masks[:split], labels[:split]
+        train_a = anchors[:split]
         val_x, val_m, val_c = images[split:], masks[split:], labels[split:]
+        val_a = anchors[split:]
     print("train", len(train_x), "val", len(val_x), flush=True)
 
     if args.neg_shards:
@@ -118,13 +138,17 @@ def main():
             train_x = np.concatenate([train_x, nx[order]])
             train_m = np.concatenate([train_m, nm[order]])
             train_c = np.concatenate([train_c, nc[order]])
+            train_a = np.concatenate([
+                train_a, np.zeros((len(order), 4), dtype=np.float32)])
             print("added negatives", len(order), flush=True)
 
-    model = RoiInkUNet(base=32).to(device)
+    model = RoiInkUNet(base=32, use_anchor=args.anchor).to(device)
     if args.init:
         checkpoint = torch.load(args.init, map_location="cpu", weights_only=False)
-        model.load_state_dict(checkpoint["state_dict"])
-        print("initialized from", args.init, flush=True)
+        missing, unexpected = model.load_state_dict(
+            checkpoint["state_dict"], strict=False)
+        print("initialized from", args.init,
+              "missing", len(missing), "unexpected", len(unexpected), flush=True)
     print("params", sum(p.numel() for p in model.parameters()), flush=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     steps = math.ceil(len(train_x) / args.batch_size)
@@ -146,6 +170,7 @@ def main():
             x = torch.from_numpy(train_x[batch]).to(device).permute(0, 3, 1, 2).float() / 255.0
             y = torch.from_numpy(train_m[batch]).to(device).unsqueeze(1)
             c = onehot_table[torch.from_numpy(train_c[batch]).to(device)]
+            a = torch.from_numpy(train_a[batch]).to(device)
             if random.random() < 0.5:
                 x = torch.flip(x, dims=[3])
                 y = torch.flip(y, dims=[3])
@@ -167,7 +192,7 @@ def main():
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                                 enabled=device.type == "cuda"):
-                logits = model(x, c)
+                logits = model(x, c, a)
                 loss = F.binary_cross_entropy_with_logits(
                     logits, y, pos_weight=pos_weight) + dice_loss(logits.float(), y)
             loss.backward()
@@ -184,9 +209,10 @@ def main():
                 x = x.permute(0, 3, 1, 2).float() / 255.0
                 y = torch.from_numpy(val_m[start:start + 128]).to(device).unsqueeze(1)
                 c = onehot_table[torch.from_numpy(val_c[start:start + 128]).to(device)]
+                a = torch.from_numpy(val_a[start:start + 128]).to(device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16,
                                     enabled=device.type == "cuda"):
-                    logits = model(x, c)
+                    logits = model(x, c, a)
                 probability.append(torch.sigmoid(logits.float()).cpu())
                 truth.append(y.cpu())
         probability = torch.cat(probability)
@@ -209,8 +235,11 @@ def main():
         if dice > best:
             best = dice
             torch.save({"state_dict": model.state_dict(),
-                        "model_kwargs": {"classes": 36, "base": 32, "class_dim": 64},
+                        "model_kwargs": {"classes": 36, "base": 32,
+                                         "class_dim": 64,
+                                         "use_anchor": bool(args.anchor)},
                         "crop_size": int(args.size),
+                        "native_pad": bool(args.native),
                         "dice": dice, "iou": iou, "threshold": threshold,
                         "epoch": epoch + 1}, args.out)
             print("saved", args.out, flush=True)

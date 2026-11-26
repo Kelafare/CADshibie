@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "classes": [3, 8, 18, 22, 28],
+  "inside": 0.6,
+  "note": "B-lite 锚点整实例重归属；实际参数以 infer.py 默认值为准，本文件用于清单留档。"
+}

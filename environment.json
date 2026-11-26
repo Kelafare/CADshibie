@@ -25,8 +25,8 @@
     "gpu_model": "NVIDIA GeForce RTX 3060 Laptop GPU (6GB, CUDA 12.4)",
     "gpu_required": false,
     "cpu_fallback": true,
-    "estimated_memory_mb": 2048,
-    "model_weight_bytes": 63500000
+    "estimated_memory_mb": 2560,
+    "model_weight_bytes": 78500000
   },
   "network": {
     "required_at_runtime": false,
@@ -37,8 +37,8 @@
   "runtime_reference": {
     "input": "1000x1000 test_final PNG",
     "workers": 6,
-    "seconds_per_image": 0.80,
+    "seconds_per_image": 1.5,
     "device": "CPU 几何 + RTX 3060 ViT",
-    "note": "hybrid + 192/256 路由 + 统一模型 class 26 的 ROI 墨迹细化：RTX 3060 下 --workers 6 约 0.80s/张；CPU-only 可运行但更慢。"
+    "note": "hybrid + 192/256 路由 + 512 统一模型 + 全图 Stuff 分支：RTX 3060 下 --workers 6 约 1.5s/张；CPU-only 可运行但更慢。"
   }
 }

@@ -177,16 +177,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="hybrid 引擎中由 GAT 接管的类别（逗号分隔）",
     )
     parser.add_argument(
-        "--segdet-classes", default="26,29,15,23,16,10,12",
+        "--segdet-classes", default="26,29,15,23,16,10,12,3,4",
         help="hybrid 引擎中由 YOLO-seg 接管的类别",
     )
     parser.add_argument(
-        "--suppress-classes", default="2,11,14,17,18,21,22,30,34",
+        "--suppress-classes", default="2,11,14,17,18,21,22,30,34,16,23",
         help="hybrid 引擎最终抑制的类别（PQ 感知门控）",
     )
     parser.add_argument(
         "--hybrid-gate-classes", default="8",
         help="hybrid 引擎中要求实例被 YOLO-seg 同类检测掩码支持的类别（逗号分隔，默认 8）",
+    )
+    parser.add_argument(
+        "--anchor-assign-classes", default="3,8,18,22,28",
+        help="B-lite 锚点整实例重归属的类别；空串关闭",
+    )
+    parser.add_argument(
+        "--anchor-assign-inside", type=float, default=0.6,
+        help="实例原子落入 YOLO 框的平均比例阈值",
+    )
+    parser.add_argument(
+        "--anchor-affinity-model", default=str(SCRIPT_DIR / "weights" / "anchor_affinity.json"),
+        help="学习式 atom-anchor 亲和力 JSON；不存在则回退硬阈值",
+    )
+    parser.add_argument(
+        "--atom-assign-classes", default="3,28",
+        help="B-lite v3 原子级归属类别；空串关闭",
+    )
+    parser.add_argument(
+        "--atom-affinity-model", default=str(SCRIPT_DIR / "weights" / "atom_affinity.json"),
+        help="原子级亲和力 JSON",
     )
     parser.add_argument(
         "--hybrid-gate-threshold", type=float, default=0.1,
@@ -217,15 +237,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="ROI 实例几何质量门限（JSON）；不存在则不过滤",
     )
     parser.add_argument(
-        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_all.json"),
+        "--roi-quality-model", default=str(SCRIPT_DIR / "weights" / "roi_quality_512c_all.json"),
         help="学习式 ROI 实例质量模型（JSON）；不存在则关闭",
     )
     parser.add_argument(
-        "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_unified.pt"),
-        help="第二套 ROI 墨迹权重（统一类别条件模型，用于 --roi-ink-aux-classes）",
+        "--stuff-weights", default=str(SCRIPT_DIR / "weights" / "stuff_unet.pt"),
+        help="全图 Stuff 语义分支权重；不存在则关闭",
     )
     parser.add_argument(
-        "--roi-ink-aux-classes", default="26",
+        "--stuff-thresholds", default=str(SCRIPT_DIR / "weights" / "stuff_thresholds.json"),
+        help="Stuff 逐类阈值 JSON（class -> threshold）",
+    )
+    parser.add_argument(
+        "--stuff-device", default="auto", choices=("auto", "cuda", "cpu"),
+    )
+    parser.add_argument(
+        "--roi-ink-weights-aux", default=str(SCRIPT_DIR / "weights" / "roi_ink_512.pt"),
+        help="第二套 ROI 墨迹权重（512 统一类别条件模型，用于 --roi-ink-aux-classes）",
+    )
+    parser.add_argument(
+        "--roi-ink-aux-classes", default="3,4,26,29,22",
         help="第二套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(
@@ -233,7 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="第三套 ROI 墨迹权重（可选，空串关闭）",
     )
     parser.add_argument(
-        "--roi-ink-extra-classes", default="8,12,14,15,18,19,20,21,22,25,27,28",
+        "--roi-ink-extra-classes", default="8,12,14,15,18,19,20,21,25,27,28",
         help="第三套 ROI 墨迹权重负责的类别",
     )
     parser.add_argument(
@@ -369,6 +400,12 @@ def _process_one(
     refiner_classes: frozenset = frozenset(),
     quality_rules=None,
     refiners=(),
+    stuff_branch=None,
+    anchor_classes=frozenset(),
+    anchor_inside: float = 0.6,
+    anchor_affinity=None,
+    atom_classes=frozenset(),
+    atom_affinity=None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     width, height = canvas
@@ -471,6 +508,28 @@ def _process_one(
             suppress=hybrid["suppress"],
             quality_rules=quality_rules,
         )
+        if anchor_classes and segdet_support:
+            detections = segdet_support.get("detections") or []
+            size = segdet_support.get("size") or (0, 0)
+            if detections and size[0] > 0 and size[1] > 0:
+                from cadvec.anchor_assign import reassign
+                data = reassign(data, detections, set(anchor_classes),
+                                int(size[1]), int(size[0]),
+                                inside=anchor_inside,
+                                affinity=anchor_affinity)
+        if atom_classes and atom_affinity and segdet_support:
+            detections = segdet_support.get("detections") or []
+            size = segdet_support.get("size") or (0, 0)
+            if detections and size[0] > 0 and size[1] > 0:
+                from cadvec.atom_assign import assign_atoms
+                data = assign_atoms(data, detections, set(atom_classes),
+                                    int(size[1]), int(size[0]),
+                                    atom_affinity)
+        if stuff_branch is not None:
+            from cadvec.stuff_branch import append_stuff
+            stuff_items = stuff_branch.infer(path)
+            if stuff_items:
+                data = append_stuff(data, stuff_items, width, height)
         write_output(data, output_dir / f"{path.stem}.json")
         return {
             "file": path.name,
@@ -799,6 +858,31 @@ def main(argv: list[str] | None = None) -> int:
         for key, value in (payload.get("rules") or {}).items():
             if isinstance(value, (list, tuple)) and len(value) == 3:
                 quality_rules[int(key)] = (str(value[0]), str(value[1]), float(value[2]))
+    anchor_affinity = None
+    if (args.anchor_assign_classes.strip()
+            and Path(args.anchor_affinity_model).exists()):
+        try:
+            anchor_affinity = json.loads(
+                Path(args.anchor_affinity_model).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            anchor_affinity = None
+    atom_affinity = None
+    if (args.atom_assign_classes.strip()
+            and Path(args.atom_affinity_model).exists()):
+        try:
+            atom_affinity = json.loads(
+                Path(args.atom_affinity_model).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            atom_affinity = None
+    stuff_branch = None
+    if args.engine == "hybrid" and Path(args.stuff_weights).exists():
+        from cadvec.stuff_branch import StuffBranch
+        stuff_branch = StuffBranch.load(
+            args.stuff_weights, args.stuff_thresholds, args.stuff_device)
+        if stuff_branch is not None:
+            print(f"Stuff 语义分支：设备 {stuff_branch.device}，"
+                  f"阈值 {stuff_branch.thresholds or 'default 0.5'}",
+                  file=sys.stderr)
     refiner = load_refiner(ExternalApiConfig(
         enabled=args.external_api,
         base_url=args.external_url,
@@ -840,6 +924,16 @@ def main(argv: list[str] | None = None) -> int:
                 refiner_classes=roi_classes,
                 quality_rules=quality_rules,
                 refiners=tuple(roi_plan),
+                stuff_branch=stuff_branch,
+                anchor_classes=frozenset(
+                    int(value) for value in args.anchor_assign_classes.split(",")
+                    if value.strip()),
+                anchor_inside=args.anchor_assign_inside,
+                anchor_affinity=anchor_affinity,
+                atom_classes=frozenset(
+                    int(value) for value in args.atom_assign_classes.split(",")
+                    if value.strip()),
+                atom_affinity=atom_affinity,
             )
         except Exception as error:  # noqa: BLE001 - 单图失败不应中断整批
             if args.fail_fast:

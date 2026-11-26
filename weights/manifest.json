@@ -1,7 +1,7 @@
 {
   "schema_version": 2,
   "limit": 5000000000,
-  "total_parameters": 19198445,
+  "total_parameters": 23077263,
   "external_network_required": false,
   "external_apis": [],
   "models": [
@@ -147,6 +147,69 @@
       "parameter_source": "manifest",
       "optional": true,
       "description": "学习式 ROI 质量门控（旧 13 类 + 统一模型 class 26；15 维概率/几何特征逐类逻辑回归），0 参数。"
+    },
+    {
+      "name": "roi-ink-512",
+      "kind": "cnn-ink-segmenter",
+      "path": "roi_ink_512.pt",
+      "parameters": 1948847,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "512×512 统一类别条件 ROI 墨迹 U-Net（30 个 Thing 类；从 256 统一模型微调 10 轮；验证 Dice 0.696/IoU 0.534）。默认负责 class 3/4/26/29；512 等比缩放显著改善细线与小符号的严格 IoU。"
+    },
+    {
+      "name": "roi-quality-512-all",
+      "kind": "decision-policy",
+      "path": "roi_quality_512_all.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "512 模型的质量门控（旧 13 类 + class 3/4/26/29；train_final val 拟合、calib 1000px 选阈值），0 参数。"
+    },
+    {
+      "name": "roi-quality-512c-all",
+      "kind": "decision-policy",
+      "path": "roi_quality_512c_all.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "精度再平衡后的默认质量门控（512 扩 class 22；calib 重标定），0 参数。"
+    },
+    {
+      "name": "atom-affinity",
+      "kind": "decision-policy",
+      "path": "atom_affinity.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "原子级 atom-anchor 亲和力（12 维几何特征、共享逻辑回归；train_final 1000 张/43.7 万对，按图纸留出），0 参数。默认仅用于 class 3/28。"
+    },
+    {
+      "name": "anchor-assign",
+      "kind": "decision-policy",
+      "path": "anchor_assign.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "B-lite 锚点整实例重归属（class 3/8/18/22/28，实例原子平均落入同类 YOLO 框 ≥0.6；0 参数，规则内置于 infer）。"
+    },
+    {
+      "name": "stuff-unet",
+      "kind": "cnn-semantic-segmenter",
+      "path": "stuff_unet.pt",
+      "parameters": 1929971,
+      "parameter_source": "torch-state-dict",
+      "optional": true,
+      "description": "全图 Stuff 语义 U-Net（512 重叠分块，30–34 五类；train_final 1598 张含 Stuff 图纸、12,582 训练块、40 轮，best val mIoU 0.333）。每类按 instance=-1 输出，不依赖 YOLO/Thing ROI。"
+    },
+    {
+      "name": "stuff-thresholds",
+      "kind": "decision-policy",
+      "path": "stuff_thresholds.json",
+      "parameters": 0,
+      "parameter_source": "manifest",
+      "optional": true,
+      "description": "Stuff 每类概率阈值与最小面积（calib 300 全图统计 TP/FP/FN 后按边际 PQ 选择），0 参数。"
     }
   ]
 }

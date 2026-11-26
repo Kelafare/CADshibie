@@ -39,12 +39,20 @@ def _conv_block(in_channels: int, out_channels: int) -> nn.Sequential:
 
 
 class RoiInkUNet(nn.Module):
-    def __init__(self, classes: int = 36, base: int = 32, class_dim: int = 64):
+    def __init__(self, classes: int = 36, base: int = 32, class_dim: int = 64,
+                 use_anchor: bool = False):
         super().__init__()
+        self.use_anchor = bool(use_anchor)
         self.class_embed = nn.Sequential(
             nn.Linear(classes, class_dim), nn.SiLU(),
             nn.Linear(class_dim, base * 8),
         )
+        self.anchor_embed = None
+        if self.use_anchor:
+            self.anchor_embed = nn.Sequential(
+                nn.Linear(4, class_dim), nn.SiLU(),
+                nn.Linear(class_dim, base * 8),
+            )
         self.enc1 = _conv_block(3, base)
         self.enc2 = _conv_block(base, base * 2)
         self.enc3 = _conv_block(base * 2, base * 4)
@@ -58,13 +66,18 @@ class RoiInkUNet(nn.Module):
         self.dec1 = _conv_block(base * 2, base)
         self.head = nn.Conv2d(base, 1, 1)
 
-    def forward(self, image: torch.Tensor, class_onehot: torch.Tensor) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, class_onehot: torch.Tensor,
+                anchor: torch.Tensor | None = None) -> torch.Tensor:
         e1 = self.enc1(image)
         e2 = self.enc2(self.pool(e1))
         e3 = self.enc3(self.pool(e2))
         e4 = self.enc4(self.pool(e3))
-        e4 = e4 + self.class_embed(class_onehot).view(
-            -1, e4.shape[1], 1, 1)
+        condition = self.class_embed(class_onehot)
+        if self.anchor_embed is not None:
+            if anchor is None:
+                anchor = torch.zeros((image.shape[0], 4), device=image.device)
+            condition = condition + self.anchor_embed(anchor)
+        e4 = e4 + condition.view(-1, e4.shape[1], 1, 1)
         d3 = self.dec3(torch.cat([self.up3(e4), e3], dim=1))
         d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
         d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
@@ -91,11 +104,63 @@ def _resample_four(points: np.ndarray) -> list[list[float]]:
     return out
 
 
+def _point_segment_distance(point, first, second) -> float:
+    vector = second - first
+    norm = float(vector @ vector)
+    if norm <= 1e-12:
+        return float(np.linalg.norm(point - first))
+    ratio = float((point - first) @ vector) / norm
+    ratio = min(max(ratio, 0.0), 1.0)
+    return float(np.linalg.norm(point - (first + ratio * vector)))
+
+
+def _four_point_error(points: np.ndarray, four: list[list[float]]) -> float:
+    corners = np.asarray(four, dtype=np.float64)
+    best = 0.0
+    for point in points:
+        distance = min(_point_segment_distance(point, corners[index],
+                                               corners[index + 1])
+                       for index in range(3))
+        best = max(best, distance)
+    return best
+
+
+def _adaptive_pieces(points: np.ndarray, eps: float,
+                     max_depth: int = 12) -> list[np.ndarray]:
+    """按四点折线与原路径的最大偏差递归切分；直线只保留一段。"""
+    stack = [(points, 0)]
+    pieces = []
+    while stack:
+        piece, depth = stack.pop()
+        if len(piece) <= 4 or depth >= max_depth:
+            pieces.append(piece)
+            continue
+        four = _resample_four(piece)
+        if not four or _four_point_error(piece, four) <= eps:
+            pieces.append(piece)
+            continue
+        errors = np.asarray([min(_point_segment_distance(
+            point, np.asarray(four[index]), np.asarray(four[index + 1]))
+            for index in range(3)) for point in piece])
+        split = int(np.argmax(errors))
+        split = min(max(split, 2), len(piece) - 2)
+        stack.append((piece[split:], depth + 1))
+        stack.append((piece[:split + 1], depth + 1))
+    return pieces
+
+
 def vectorize_mask(mask: np.ndarray, left: int, top: int,
                    crop_width: int, crop_height: int,
                    scale_x: float, scale_y: float,
-                   threshold: float = 0.5) -> list[tuple[list[list[float]], float]]:
-    """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。"""
+                   threshold: float = 0.5,
+                   chunk: int = CHUNK,
+                   adaptive: bool = False,
+                   eps: float = 0.10) -> list[tuple[list[list[float]], float]]:
+    """把某一裁剪区域内的概率掩码转成若干 4 点短折线（画布坐标）。
+
+    ``chunk`` 是每条折线最多使用的骨架点数；4 点重采样前保留更长路径可以
+    减少碎片，但会增大弯曲处的四点误差。默认值保持与旧权重训练时一致。
+    """
     local = remove_small_objects(mask > threshold, min_size=8, connectivity=2)
     if local.sum() < 8:
         return []
@@ -105,13 +170,18 @@ def vectorize_mask(mask: np.ndarray, left: int, top: int,
     step_x = crop_width / float(mask.shape[1])
     step_y = crop_height / float(mask.shape[0])
     segments = []
+    chunk = max(int(chunk), 2)
     for path in trace_paths(skeleton, min_pixels=2):
         points = np.asarray(
             [((left + (column + 0.5) * step_x) / scale_x,
               (top + (row + 0.5) * step_y) / scale_y)
              for row, column in path], dtype=np.float64)
-        for start in range(0, len(points) - 1, CHUNK):
-            piece = points[start:start + CHUNK + 1]
+        if adaptive:
+            pieces = _adaptive_pieces(points, eps)
+        else:
+            pieces = [points[start:start + chunk + 1]
+                      for start in range(0, len(points) - 1, chunk)]
+        for piece in pieces:
             if len(piece) < 2:
                 continue
             length = float(np.linalg.norm(np.diff(piece, axis=0), axis=1).sum())
@@ -128,13 +198,16 @@ class RoiInkRefiner:
 
     def __init__(self, model: RoiInkUNet, device: torch.device,
                  threshold: float = 0.5, max_instances: int = 15,
-                 crop_size: int = CROP_SIZE, quality_model: dict | None = None):
+                 crop_size: int = CROP_SIZE, quality_model: dict | None = None,
+                 native_pad: bool = False):
         self.model = model
         self.device = device
         self.threshold = threshold
         self.max_instances = max_instances
         self.crop_size = int(crop_size)
         self.quality_model = quality_model
+        self.native_pad = bool(native_pad)
+        self.use_anchor = bool(getattr(model, "use_anchor", False))
         self.onehot = torch.eye(36, device=device)
 
     @classmethod
@@ -165,7 +238,8 @@ class RoiInkRefiner:
                    threshold=float(checkpoint.get("threshold", 0.5)),
                    max_instances=max_instances,
                    crop_size=int(checkpoint.get("crop_size", CROP_SIZE)),
-                   quality_model=quality_model)
+                   quality_model=quality_model,
+                   native_pad=bool(checkpoint.get("native_pad", False)))
 
     def _crop(self, box, width: int, height: int):
         x0, y0, x1, y1 = box
@@ -246,27 +320,74 @@ class RoiInkRefiner:
         crops, meta = [], []
         for class_id, confidence, det_box in boxes:
             left, top, right, bottom = self._crop(det_box, width, height)
-            crop = cv2.resize(image[top:bottom, left:right],
-                              (self.crop_size, self.crop_size),
-                              interpolation=cv2.INTER_AREA)
-            crops.append(crop)
-            meta.append((class_id, confidence, det_box, left, top, right, bottom))
+            crop_width = right - left
+            crop_height = bottom - top
+            if self.native_pad:
+                valid_w, valid_h = crop_width, crop_height
+                if valid_w > self.crop_size or valid_h > self.crop_size:
+                    ratio = min(self.crop_size / valid_w,
+                                self.crop_size / valid_h)
+                    valid_w = max(1, int(round(valid_w * ratio)))
+                    valid_h = max(1, int(round(valid_h * ratio)))
+                    crop = cv2.resize(
+                        image[top:bottom, left:right], (valid_w, valid_h),
+                        interpolation=cv2.INTER_AREA)
+                else:
+                    crop = image[top:bottom, left:right]
+                canvas = np.full((self.crop_size, self.crop_size, 3), 255,
+                                 dtype=np.uint8)
+                canvas[:valid_h, :valid_w] = crop
+                crops.append(canvas)
+                meta.append((class_id, confidence, det_box, left, top,
+                             right, bottom, crop_width, crop_height,
+                             valid_w, valid_h))
+            else:
+                crop = cv2.resize(image[top:bottom, left:right],
+                                  (self.crop_size, self.crop_size),
+                                  interpolation=cv2.INTER_AREA)
+                crops.append(crop)
+                meta.append((class_id, confidence, det_box, left, top,
+                             right, bottom))
         batch = torch.from_numpy(np.stack(crops)).to(self.device)
         batch = batch.permute(0, 3, 1, 2).float() / 255.0
         class_ids = torch.tensor([item[0] for item in meta], device=self.device)
+        anchor_tensor = None
+        if self.use_anchor:
+            values = []
+            for item in meta:
+                _class_id, _conf, det_box = item[0], item[1], item[2]
+                x0, y0, x1, y1 = det_box
+                values.append([
+                    (x0 + x1) / 2.0 / max(width, 1),
+                    (y0 + y1) / 2.0 / max(height, 1),
+                    (x1 - x0) / max(width, 1),
+                    (y1 - y0) / max(height, 1),
+                ])
+            anchor_tensor = torch.tensor(values, dtype=torch.float32,
+                                         device=self.device)
         with torch.autocast(device_type="cuda" if self.device.type == "cuda" else "cpu",
                             dtype=torch.bfloat16, enabled=self.device.type == "cuda"):
-            logits = self.model(batch, self.onehot[class_ids])
+            logits = self.model(batch, self.onehot[class_ids], anchor_tensor)
         probabilities = torch.sigmoid(logits.float())[:, 0].cpu().numpy()
         scale_x = width / max(canvas_width, 1)
         scale_y = height / max(canvas_height, 1)
         results = []
-        for (class_id, confidence, det_box, left, top, right, bottom), probability in zip(
-                meta, probabilities):
-            resized = cv2.resize(probability, (right - left, bottom - top),
-                                 interpolation=cv2.INTER_LINEAR)
+        for item, probability in zip(meta, probabilities):
+            (class_id, confidence, det_box, left, top, right, bottom) = item[:7]
+            if self.native_pad:
+                crop_width, crop_height, valid_w, valid_h = item[7:11]
+                resized = probability[:valid_h, :valid_w]
+                if (valid_w, valid_h) != (crop_width, crop_height):
+                    resized = cv2.resize(
+                        resized, (crop_width, crop_height),
+                        interpolation=cv2.INTER_LINEAR)
+            else:
+                crop_width = right - left
+                crop_height = bottom - top
+                resized = cv2.resize(probability, (crop_width, crop_height),
+                                     interpolation=cv2.INTER_LINEAR)
             segments = vectorize_mask(
-                resized, left, top, right - left, bottom - top,
+                resized, left, top, crop_width, crop_height,
                 scale_x, scale_y, self.threshold)
             if not segments:
                 continue
@@ -288,6 +409,7 @@ class RoiInkRefiner:
                 "features": self._features(
                     class_id, confidence, det_box, segments, resized,
                     scale_x, scale_y, canvas_width, canvas_height),
+                "probability": resized,
                 "box": (left, top, right, bottom),
                 "det_box": det_box,
             })
