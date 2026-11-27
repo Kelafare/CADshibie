@@ -1,4 +1,4 @@
-# 图纸分析赛道优化方案：从实例归属、几何一致性到可复现评测
+·# 图纸分析赛道优化方案：从实例归属、几何一致性到可复现评测
 
 > 编写日期：2026-11-22。审查基线：`6c228313d53fa55e587301bc92f07abc7d8359dd`。
 > 本次交付仅新增本文，不修改代码、权重、依赖、既有文档或运行配置。
@@ -24,7 +24,7 @@ JSON 是提交协议，不是识别算法。内部可以使用张量、实例掩
 
 ### 2.1 当前可以确定的接口
 
-依据 [README](README.md)、[提交说明](提交说明.txt)、[配置常量](cadvec/config.py) 和 [输出校验](cadvec/schema.py)：
+依据 [README](../README.md)、[提交说明](../提交说明.txt)、[配置常量](../cadvec/config.py) 和 [输出校验](../cadvec/schema.py)：
 
 | 项目 | 当前仓库要求 |
 |---|---|
@@ -49,7 +49,7 @@ JSON 是提交协议，不是识别算法。内部可以使用张量、实例掩
 
 ### 3.1 入口与默认流程
 
-实际入口为仓库根目录的 [infer.py](infer.py)，`run.sh` 最后也是执行它。`infer.py:100` 的默认引擎是 `hybrid`，不是部分帮助文本、README 段落和提交说明仍写的 `v2`；默认线程数是 1。文档中的“v3”不是一个可选 engine，而是 `pipeline_v2` 配合策略、去重和数量限制形成的配置。
+实际入口为仓库根目录的 [infer.py](../infer.py)，`run.sh` 最后也是执行它。`infer.py:100` 的默认引擎是 `hybrid`，不是部分帮助文本、README 段落和提交说明仍写的 `v2`；默认线程数是 1。文档中的“v3”不是一个可选 engine，而是 `pipeline_v2` 配合策略、去重和数量限制形成的配置。
 
 ```mermaid
 flowchart TD
@@ -200,7 +200,7 @@ PQ = SQ × RQ
 | GT 辅助笔画归属 | 历史召回 59.7% | 是特定 oracle 的召回，不是可实现 PQ，也不是全任务上限 |
 | 模板拟合 | GT 位姿命中约 62.2%；GT 框和类别下约 2.3% | 当前瓶颈是对应关系与位姿恢复；模板库扩容暂缓 |
 
-主要证据见 [OPTIMIZATION.md](OPTIMIZATION.md) 第 7、8、10、12 节，以及 [validation.json](validation.json)。calib/holdout 各 500 张只是历史切分；不能据此确认最终 holdout 从未参与选类、门限或模型路线选择。
+主要证据见 [OPTIMIZATION.md](OPTIMIZATION.md) 第 7、8、10、12 节，以及 [validation.json](../validation.json)。calib/holdout 各 500 张只是历史切分；不能据此确认最终 holdout 从未参与选类、门限或模型路线选择。
 
 对既有研究文档，应调整三项判断：
 
